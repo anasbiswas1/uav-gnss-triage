@@ -1,0 +1,4 @@
+flight_id,q_nominal,q_spoof,q_gps_degrade,q_sensor_fault,family,subtype,pred,conf,set_a0.10,set_a0.20
+whelan_ace-benign-log_0_2033-8-19-16-27-30,0.35981057344282996,0.2622330804784968,0.06834487816059776,0.3096114679180755,nominal,live_nominal,nominal,0.35981057344282996,"nominal,gps_degrade,sensor_fault","nominal,sensor_fault"
+whelan_ace-jamming-log_1_2033-8-19-16-46-46,0.3808829064634603,0.24794885079016468,0.11544127788551248,0.25572696486086266,gps_degrade,live_gps_degrade,nominal,0.3808829064634603,"nominal,gps_degrade,sensor_fault","nominal,gps_degrade,sensor_fault"
+whelan_ace-spoofing-hackrf-log_5_2033-8-19-17-14-18,0.4446793542268816,0.21555504219629856,0.11057252131020659,0.22919308226661322,spoof,live_spoof,nominal,0.4446793542268816,"nominal,gps_degrade,sensor_fault","nominal,gps_degrade,sensor_fault"

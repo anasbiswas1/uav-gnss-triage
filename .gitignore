@@ -1,0 +1,18 @@
+# datasets, simulator caches, third-party trees
+data/
+external/
+
+# secrets, never commit
+.secrets/
+*.env
+.git-credentials
+.gitconfig
+kaggle.json
+
+# python / notebooks
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# os
+.DS_Store
