@@ -1,0 +1,46 @@
+{
+ "rule_fine_alpha0.1": {
+  "nominal": 0.7244836698660344,
+  "spoof": 0.5519572125106169,
+  "gps_degrade": 0.9911807889648512,
+  "sensor_fault": 0.9535297059998411
+ },
+ "rule_coarse_alpha0.1": {
+  "nominal": 0.7244836698660344,
+  "gnss_chain": 0.5355843112020529,
+  "non_gnss_fault": 0.9535297059998411
+ },
+ "rule_fine_alpha0.2": {
+  "nominal": 0.5720314190897557,
+  "spoof": 0.5207535661205059,
+  "gps_degrade": 0.8526354124631247,
+  "sensor_fault": 0.8887260830448919
+ },
+ "rule_coarse_alpha0.2": {
+  "nominal": 0.5720314190897557,
+  "gnss_chain": 0.47238713677990907,
+  "non_gnss_fault": 0.8887260830448919
+ },
+ "stacked_fine_alpha0.1": {
+  "nominal": 0.9516712114241747,
+  "spoof": 0.7655006395344222,
+  "gps_degrade": 0.08403688294290534,
+  "sensor_fault": 0.12493454745860544
+ },
+ "stacked_coarse_alpha0.1": {
+  "nominal": 0.9516712114241747,
+  "gnss_chain": 0.4883856650323858,
+  "non_gnss_fault": 0.12493454745860544
+ },
+ "stacked_fine_alpha0.2": {
+  "nominal": 0.39275073159975493,
+  "spoof": 0.5083135156970364,
+  "gps_degrade": 0.05671863155901902,
+  "sensor_fault": 0.07536978724037635
+ },
+ "stacked_coarse_alpha0.2": {
+  "nominal": 0.39275073159975493,
+  "gnss_chain": 0.22061928604308978,
+  "non_gnss_fault": 0.07536978724037635
+ }
+}

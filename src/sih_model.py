@@ -17,7 +17,7 @@ Experiments
   E1  In-distribution, flight-grouped: 20 train / 20 calibration / 20 test flights per family, R repetitions.
       Window metrics raw vs temperature-scaled; flight accuracy for rule and stacked aggregation; class-conditional
       conformal sets at the flight level (alpha 0.10 and 0.20; with 20 calibration flights per class alpha 0.05 would
-      be the degenerate rank-20-of-20 threshold); risk-coverage and AURC.
+      use the largest calibration score, the most conservative finite threshold, so it is not reported); risk-coverage and AURC.
   E2  Leave-one-subtype-out with the stacked pipeline.
   E3  Whelan live logs as external case studies.
 
@@ -42,16 +42,20 @@ from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings('ignore')
 CLASSES = ['nominal', 'spoof', 'gps_degrade', 'sensor_fault']
-META = {'t_start', 't_end', 'flight_id', 'source', 'family', 'subtype', 'onset_s', 'restore_s',
+META = {'t_start', 't_end', 'flight_id', 'source', 'run', 'family', 'subtype', 'onset_s', 'restore_s',
         'home_lat', 'noise_k', 'noise_t', 'noise_p', 'window_label', 'log'}
-CTX_FEATS = ['posvel_rms', 'step_minus_vel_max', 'step_speed_max', 'gps_baro_dz_rms', 'dv_gps_minus_imu',
-             'gps_ekf_dpos_rms', 'gps_gap_frac', 'baro_gap_frac', 'mag_gap_frac', 'baro_raw_std', 'mag_raw_std',
+COARSE = {'nominal': 'nominal', 'spoof': 'gnss_chain', 'gps_degrade': 'gnss_chain', 'sensor_fault': 'non_gnss_fault'}
+COARSE_CLASSES = ['nominal', 'gnss_chain', 'non_gnss_fault']
+CTX_FEATS = ['posvel_rms', 'step_minus_vel_max', 'step_speed_max', 'gps_baro_dz_rms', 'dv_gps_imu_vecdiff',
+             'gps_ekf_dpos_rms', 'gps_gap_frac', 'gps_nofix_frac', 'gps_silent_frac', 'baro_gap_frac', 'mag_gap_frac',
+             'baro_raw_std', 'mag_raw_std',
              'tr_gpsHpos0_absmax', 'tr_gpsHpos1_absmax', 'tr_gpsHvel0_absmax', 'tr_gpsVpos_absmax',
              'tr_baroVpos_absmax', 'tr_heading_absmax', 'inn_gpsHpos0_absmax', 'inn_gpsHvel0_absmax']
 REL_FEATS = ['baro_raw_std', 'mag_raw_std', 'mag_norm_std', 'mag_norm_mean', 'gyro_std_mean', 'baro_std',
              'posvel_rms', 'gps_ekf_dpos_rms', 'gps_baro_dz_rms', 'acc_horiz_rms', 'inn_gpsHpos0_absmax',
              'inn_gpsHvel0_absmax', 'inn_baroVpos_absmax', 'inn_heading_absmax']
-AGG_RAW = ['gps_gap_frac', 'baro_gap_frac', 'mag_gap_frac', 'posvel_rms', 'step_minus_vel_max', 'gps_ekf_dpos_rms',
+AGG_RAW = ['gps_gap_frac', 'gps_nofix_frac', 'gps_silent_frac', 'baro_gap_frac', 'mag_gap_frac', 'posvel_rms',
+           'step_minus_vel_max', 'gps_ekf_dpos_rms',
            'gps_baro_dz_rms', 'tr_gpsHpos0_absmax', 'tr_baroVpos_absmax', 'tr_heading_absmax']
 
 
@@ -188,6 +192,13 @@ def finish_scores(S):
     Q = S[[f'q_{c}' for c in CLASSES]].to_numpy()
     S['pred'] = [CLASSES[i] for i in Q.argmax(1)]
     S['conf'] = Q.max(1)
+    # coarse level: probabilities summed within each coarse class, argmax and confidence recomputed
+    for cc in COARSE_CLASSES:
+        S[f'qc_{cc}'] = sum(S[f'q_{c}'] for c in CLASSES if COARSE[c] == cc)
+    QC = S[[f'qc_{cc}' for cc in COARSE_CLASSES]].to_numpy()
+    S['coarse_family'] = S['family'].map(COARSE)
+    S['coarse_pred'] = [COARSE_CLASSES[i] for i in QC.argmax(1)]
+    S['coarse_conf'] = QC.max(1)
     return S
 
 
@@ -202,9 +213,8 @@ def rule_scores(A):
     return finish_scores(S)
 
 
-def stacked_pipeline(W_tr, feats, seed, n_folds=4):
-    """Cross-fit the window model on training flights, fit the flight model on out-of-fold aggregates, then refit
-    the window model on all training flights. Returns (window model, flight model, aggregate columns)."""
+def oof_probs(make_model, W_tr, feats, seed, n_folds=4):
+    """Out-of-fold window probabilities on the training flights (folds are flights, stratified by family)."""
     F_tr = W_tr.groupby('flight_id')['family'].first().reset_index()
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     P_oof = np.zeros((len(W_tr), len(CLASSES)))
@@ -212,13 +222,22 @@ def stacked_pipeline(W_tr, feats, seed, n_folds=4):
     for _, ho_idx in skf.split(F_tr['flight_id'], F_tr['family']):
         ho = set(F_tr['flight_id'].iloc[ho_idx])
         m_ho = np.isin(fid, list(ho)); m_tr = ~m_ho
-        model = fit(make_xgb(seed), W_tr.loc[m_tr, feats], W_tr.loc[m_tr, 'window_label'])
+        model = fit(make_model(seed), W_tr.loc[m_tr, feats], W_tr.loc[m_tr, 'window_label'])
         P_oof[m_ho] = predict_proba(model, W_tr.loc[m_ho, feats])
+    return P_oof
+
+
+def stacked_pipeline(W_tr, feats, seed, n_folds=4):
+    """Cross-fit the window model on training flights, fit the flight model on out-of-fold aggregates, then refit
+    the window model on all training flights. Returns (window model, flight model, aggregate columns, temperature
+    fitted on the out-of-fold training probabilities, so calibration flights are used for conformal thresholds only)."""
+    P_oof = oof_probs(make_xgb, W_tr, feats, seed, n_folds)
+    T = fit_temperature(P_oof, np.array([CLASSES.index(v) for v in W_tr['window_label']]))
     A_tr = flight_aggregates(W_tr, P_oof)
     agg_cols = [c for c in A_tr.columns if c not in ('flight_id', 'family', 'subtype')]
     fmodel = fit(make_flight_model(seed), A_tr[agg_cols], A_tr['family'])
     wmodel = fit(make_xgb(seed), W_tr[feats], W_tr['window_label'])
-    return wmodel, fmodel, agg_cols
+    return wmodel, fmodel, agg_cols, T
 
 
 def stacked_scores(W, P, fmodel, agg_cols):
@@ -231,10 +250,13 @@ def stacked_scores(W, P, fmodel, agg_cols):
 
 
 # ------------------------------------------------------------------ conformal and selective prediction
-def conformal_thresholds(S_cal, alpha):
+def conformal_thresholds(S_cal, alpha, level='fine'):
+    """Class-conditional split-conformal thresholds. level='coarse' calibrates separately on the summed coarse
+    probabilities and coarse labels (a coarse set is never derived by projecting a fine set)."""
+    classes, qp, fam = (CLASSES, 'q_', 'family') if level == 'fine' else (COARSE_CLASSES, 'qc_', 'coarse_family')
     th = {}
-    for c in CLASSES:
-        s = 1.0 - S_cal.loc[S_cal.family == c, f'q_{c}'].to_numpy()
+    for c in classes:
+        s = 1.0 - S_cal.loc[S_cal[fam] == c, f'{qp}{c}'].to_numpy()
         n = len(s)
         if n == 0:
             th[c] = 1.0; continue
@@ -243,21 +265,24 @@ def conformal_thresholds(S_cal, alpha):
     return th
 
 
-def conformal_sets(S, th):
-    return [[c for c in CLASSES if 1.0 - r[f'q_{c}'] <= th[c]] for _, r in S.iterrows()]
+def conformal_sets(S, th, level='fine'):
+    classes, qp = (CLASSES, 'q_') if level == 'fine' else (COARSE_CLASSES, 'qc_')
+    return [[c for c in classes if 1.0 - r[f'{qp}{c}'] <= th[c]] for _, r in S.iterrows()]
 
 
-def conformal_report(S_test, th, tag):
-    sets = conformal_sets(S_test, th)
+def conformal_report(S_test, th, tag, level='fine'):
+    classes, fam = (CLASSES, 'family') if level == 'fine' else (COARSE_CLASSES, 'coarse_family')
+    sets = conformal_sets(S_test, th, level)
     out = []
-    for c in CLASSES:
-        m = (S_test.family == c).to_numpy()
+    for c in classes:
+        m = (S_test[fam] == c).to_numpy()
         if not m.any():
             continue
         sel = [s for s, mm in zip(sets, m) if mm]
-        out.append({'tag': tag, 'family': c, 'coverage': float(np.mean([c in s for s in sel])),
+        out.append({'tag': tag, 'level': level, 'family': c, 'coverage': float(np.mean([c in s for s in sel])),
                     'avg_set_size': float(np.mean([len(s) for s in sel])),
-                    'abstain_rate': float(np.mean([len(s) != 1 for s in sel])), 'n': int(m.sum())})
+                    'abstain_rate': float(np.mean([len(s) != 1 for s in sel])),
+                    'empty_rate': float(np.mean([len(s) == 0 for s in sel])), 'n': int(m.sum())})
     return pd.DataFrame(out), sets
 
 
@@ -326,14 +351,14 @@ def main():
         W_tr, W_ca, W_te = sub(Ws, tr), sub(Ws, ca), sub(Ws, te)
         for name, mk in (('xgb', make_xgb), ('logreg', make_logreg)):
             model = fit(mk(rep), W_tr[feats], W_tr['window_label'])
-            P_cal, P_te = predict_proba(model, W_ca[feats]), predict_proba(model, W_te[feats])
-            T = fit_temperature(P_cal, np.array([CLASSES.index(v) for v in W_ca['window_label']]))
+            P_te = predict_proba(model, W_te[feats])
+            T = fit_temperature(oof_probs(mk, W_tr, feats, rep), np.array([CLASSES.index(v) for v in W_tr['window_label']]))
             wm.append({'rep': rep, 'model': name, 'T': T, **window_metrics(P_te, W_te['window_label'], 'raw')})
             wm.append({'rep': rep, 'model': name, 'T': T, **window_metrics(apply_temperature(P_te, T), W_te['window_label'], 'temp_scaled')})
-        wmodel, fmodel, agg_cols = stacked_pipeline(W_tr, feats, rep)
+        wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, rep)
         P_cal, P_te = predict_proba(wmodel, W_ca[feats]), predict_proba(wmodel, W_te[feats])
-        T = fit_temperature(P_cal, np.array([CLASSES.index(v) for v in W_ca['window_label']]))
         P_cal_t, P_te_t = apply_temperature(P_cal, T), apply_temperature(P_te, T)
+        thresholds = {}
         for agg in ('rule', 'stacked'):
             if agg == 'rule':
                 S_cal, S_te = rule_scores(flight_aggregates(W_ca, P_cal_t)), rule_scores(flight_aggregates(W_te, P_te_t))
@@ -341,15 +366,21 @@ def main():
                 S_cal, S_te = stacked_scores(W_ca, P_cal, fmodel, agg_cols), stacked_scores(W_te, P_te, fmodel, agg_cols)
             rcurve, aurc = risk_coverage(S_te)
             fm.append({'rep': rep, 'aggregation': agg, 'flight_acc': accuracy_score(S_te.family, S_te.pred),
-                       'flight_macro_f1': f1_score(S_te.family, S_te.pred, average='macro'), 'aurc': aurc})
+                       'flight_macro_f1': f1_score(S_te.family, S_te.pred, average='macro'), 'aurc': aurc,
+                       'coarse_acc': accuracy_score(S_te.coarse_family, S_te.coarse_pred),
+                       'coarse_macro_f1': f1_score(S_te.coarse_family, S_te.coarse_pred, average='macro')})
             for alpha in (0.10, 0.20):
-                th = conformal_thresholds(S_cal, alpha)
-                rep_df, _ = conformal_report(S_te, th, f'{agg}_alpha{alpha}')
-                rep_df['rep'] = rep; rep_df['aggregation'] = agg; rep_df['alpha'] = alpha
-                cf.append(rep_df)
+                for level in ('fine', 'coarse'):
+                    th = conformal_thresholds(S_cal, alpha, level)
+                    thresholds[f'{agg}_{level}_alpha{alpha}'] = th
+                    rep_df, sets = conformal_report(S_te, th, f'{agg}_alpha{alpha}', level)
+                    rep_df['rep'] = rep; rep_df['aggregation'] = agg; rep_df['alpha'] = alpha
+                    cf.append(rep_df)
+                    S_te[f'set_{level}_a{alpha}'] = [','.join(x) for x in sets]
             rcurve['rep'] = rep; rcurve['aggregation'] = agg; rc_all.append(rcurve)
-            if rep == 0:
-                S_te.to_csv(out / f'e1_rep0_{agg}_flight_scores.csv', index=False)
+            S_te.assign(rep=rep, aggregation=agg).to_csv(out / f'e1_rep{rep}_{agg}_flight_scores.csv', index=False)
+            S_cal.assign(rep=rep, aggregation=agg).to_csv(out / f'e1_rep{rep}_{agg}_calibration_scores.csv', index=False)
+        (out / f'e1_rep{rep}_thresholds.json').write_text(json.dumps(thresholds, indent=1))
         if rep == 0:
             imp = getattr(wmodel, 'feature_importances_', None)
             if imp is not None:
@@ -362,9 +393,9 @@ def main():
     WM.to_csv(out / 'e1_window_metrics.csv', index=False); FM.to_csv(out / 'e1_flight_metrics.csv', index=False)
     CF.to_csv(out / 'e1_conformal.csv', index=False); pd.concat(rc_all).to_csv(out / 'e1_risk_coverage.csv', index=False)
     print('\n[E1] window metrics, mean over reps:\n', WM.groupby(['model', 'tag'])[['acc', 'macro_f1', 'ece', 'nll', 'brier']].mean().round(4).to_string())
-    print('\n[E1] flight-level, mean (std) over reps:\n', FM.groupby('aggregation')[['flight_acc', 'flight_macro_f1', 'aurc']].agg(['mean', 'std']).round(3).to_string())
+    print('\n[E1] flight-level, mean (std) over reps:\n', FM.groupby('aggregation')[['flight_acc', 'flight_macro_f1', 'aurc', 'coarse_acc', 'coarse_macro_f1']].agg(['mean', 'std']).round(3).to_string())
     print('\n[E1] class-conditional conformal at flight level, mean over reps:\n',
-          CF.groupby(['aggregation', 'alpha', 'family'])[['coverage', 'avg_set_size', 'abstain_rate']].mean().round(3).to_string())
+          CF.groupby(['aggregation', 'level', 'alpha', 'family'])[['coverage', 'avg_set_size', 'abstain_rate', 'empty_rate']].mean().round(3).to_string())
 
     # ---------------- E2 leave-one-subtype-out (stacked pipeline)
     loso = []
@@ -379,18 +410,24 @@ def main():
                 n_tr = min(20, len(ids) // 2); n_ca = min(20, len(ids) - n_tr)
                 tr += ids[:n_tr]; ca += ids[n_tr:n_tr + n_ca]
             W_tr, W_ca, W_h = sub(Ws, tr), sub(Ws, ca), sub(Ws, held)
-            wmodel, fmodel, agg_cols = stacked_pipeline(W_tr, feats, 7)
+            wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 7)
             S_cal = stacked_scores(W_ca, predict_proba(wmodel, W_ca[feats]), fmodel, agg_cols)
             S_h = stacked_scores(W_h, predict_proba(wmodel, W_h[feats]), fmodel, agg_cols)
+            cfam = COARSE[fam]
             row = {'held_out_family': fam, 'held_out_subtype': st, 'n_held': len(S_h),
                    'acc_on_held': float((S_h.pred == fam).mean()),
+                   'coarse_acc_on_held': float((S_h.coarse_pred == cfam).mean()),
                    'pred_dist_on_held': json.dumps(S_h.pred.value_counts().to_dict()),
                    'mean_conf_on_held': float(S_h.conf.mean())}
             for alpha in (0.10, 0.20):
                 th = conformal_thresholds(S_cal, alpha)
                 sets = conformal_sets(S_h, th)
-                row[f'coverage_a{alpha}'] = float(np.mean([fam in s for s in sets]))
-                row[f'abstain_a{alpha}'] = float(np.mean([len(s) != 1 for s in sets]))
+                row[f'coverage_a{alpha}'] = float(np.mean([fam in x for x in sets]))
+                row[f'abstain_a{alpha}'] = float(np.mean([len(x) != 1 for x in sets]))
+                thc = conformal_thresholds(S_cal, alpha, 'coarse')
+                csets = conformal_sets(S_h, thc, 'coarse')
+                row[f'coarse_coverage_a{alpha}'] = float(np.mean([cfam in x for x in csets]))
+                row[f'coarse_abstain_a{alpha}'] = float(np.mean([len(x) != 1 for x in csets]))
             loso.append(row)
             S_h.assign(held_out_subtype=st).to_csv(out / f'e2_held_{st}_flight_scores.csv', index=False)
     LOSO = pd.DataFrame(loso); LOSO.to_csv(out / 'e2_leave_one_subtype_out.csv', index=False)
@@ -400,11 +437,11 @@ def main():
     if len(Ww):
         tr, ca, te = split_flights(F, np.random.RandomState(0), n_train=40, n_cal=20)
         W_tr, W_ca = sub(Ws, tr), sub(Ws, ca)
-        wmodel, fmodel, agg_cols = stacked_pipeline(W_tr, feats, 0)
+        wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 0)
         P_ca = predict_proba(wmodel, W_ca[feats])
         S_cal = stacked_scores(W_ca, P_ca, fmodel, agg_cols)
         th10, th20 = conformal_thresholds(S_cal, 0.10), conformal_thresholds(S_cal, 0.20)
-        T = fit_temperature(P_ca, np.array([CLASSES.index(v) for v in W_ca['window_label']]))
+        thc10 = conformal_thresholds(S_cal, 0.10, 'coarse')
         Pw = predict_proba(wmodel, Ww[feats]); Pw_t = apply_temperature(Pw, T)
         Ww_out = Ww[['flight_id', 'family', 't_start', 't_end']].copy()
         for i, c in enumerate(CLASSES):
@@ -412,13 +449,14 @@ def main():
         Ww_out['pred'] = [CLASSES[i] for i in Pw_t.argmax(1)]
         Ww_out.to_csv(out / 'e3_whelan_window_timeline.csv', index=False)
         Sw = stacked_scores(Ww, Pw, fmodel, agg_cols)
-        Sw['set_a0.10'] = [','.join(s) for s in conformal_sets(Sw, th10)]
-        Sw['set_a0.20'] = [','.join(s) for s in conformal_sets(Sw, th20)]
+        Sw['set_a0.10'] = [','.join(x) for x in conformal_sets(Sw, th10)]
+        Sw['set_a0.20'] = [','.join(x) for x in conformal_sets(Sw, th20)]
+        Sw['coarse_set_a0.10'] = [','.join(x) for x in conformal_sets(Sw, thc10, 'coarse')]
         Sw.to_csv(out / 'e3_whelan_flight_verdicts.csv', index=False)
         print('\n[E3] Whelan window predicted-class fractions per flight:\n',
               Ww_out.groupby('flight_id')['pred'].value_counts(normalize=True).round(2).to_string())
         print('\n[E3] Whelan flight verdicts (stacked) with conformal sets:\n',
-              Sw[['flight_id', 'family', 'pred', 'conf', 'set_a0.10', 'set_a0.20']].round(3).to_string(index=False))
+              Sw[['flight_id', 'family', 'pred', 'conf', 'set_a0.10', 'set_a0.20', 'coarse_pred', 'coarse_set_a0.10']].round(3).to_string(index=False))
     print('\nresults written to', out)
 
 

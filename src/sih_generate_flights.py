@@ -69,9 +69,9 @@ def make_mission_item(lat, lon, alt, speed):
     return MissionItem(**{k: v for k, v in kw.items() if k in params})
 
 
-def draw_config(rng, family):
+def draw_config(rng, family, only_subtype=None):
     """Sample the per-flight injection configuration. Everything here is recorded in the manifest."""
-    cfg = {'family': family, 'subtype': None, 'onset_s': None, 'params': {}, 'failure': None,
+    cfg = {'family': family, 'subtype': None, 'onset_s': None, 'params': {}, 'failure': None, 'rxmode': None,
            # nuisance: receiver noise model randomised for every family. SIM_GPS_NOISE_T > 0 selects the
            # realism model: slow bias with correlation time T (s) and std P (m), white jitter J (m);
            # velocity noise about 0.04 to 0.10 m/s.
@@ -86,7 +86,7 @@ def draw_config(rng, family):
     cfg['onset_s'] = round(rng.uniform(20.0, 70.0), 1)          # sim seconds after mission start
     if family == 'spoof':
         heading = rng.uniform(0, 2 * math.pi)
-        sub = rng.choice(['jump', 'drift_incoherent', 'drift_coherent'])
+        sub = only_subtype or rng.choice(['jump', 'drift_incoherent', 'drift_coherent'])
         cfg['subtype'] = sub
         if sub == 'jump':
             jump = rng.uniform(20.0, 150.0)
@@ -101,12 +101,18 @@ def draw_config(rng, family):
                              'SIM_GPS_SPF_MAX': rng.uniform(100.0, 400.0),
                              'SIM_GPS_SPF_VEL': 1 if sub == 'drift_coherent' else 0}
     elif family == 'gps_degrade':
-        sub = rng.choice(['off_then_ok', 'stuck_then_ok'])
+        sub = only_subtype or rng.choice(['off_then_ok', 'stuck_then_ok', 'no_fix_then_ok'])
         cfg['subtype'] = sub
-        cfg['failure'] = {'unit': 'SENSOR_GPS', 'type': 'OFF' if sub == 'off_then_ok' else 'STUCK',
-                          'restore_after_s': round(rng.uniform(15.0, 60.0), 1)}
+        if sub == 'no_fix_then_ok':
+            # receiver-status intervention: PX4's simulated receiver reports fix_type 0 (eph 100) while messages
+            # continue when SIM_GPS_USED < 4; this is the real-receiver outage signature, distinct from OFF (silence)
+            cfg['rxmode'] = {'param': 'SIM_GPS_USED', 'value': int(rng.choice([2, 3])), 'restore_value': 10,
+                             'restore_after_s': round(rng.uniform(15.0, 60.0), 1)}
+        else:
+            cfg['failure'] = {'unit': 'SENSOR_GPS', 'type': 'OFF' if sub == 'off_then_ok' else 'STUCK',
+                              'restore_after_s': round(rng.uniform(15.0, 60.0), 1)}
     elif family == 'sensor_fault':
-        sub = rng.choice(['baro_stuck', 'mag_stuck'])
+        sub = only_subtype or rng.choice(['baro_stuck', 'mag_stuck'])
         cfg['subtype'] = sub
         cfg['failure'] = {'unit': 'SENSOR_BARO' if sub == 'baro_stuck' else 'SENSOR_MAG', 'type': 'STUCK',
                           'restore_after_s': round(rng.uniform(15.0, 60.0), 1)}
@@ -207,14 +213,18 @@ async def fly_one(px4_bin, px4_etc, rootfs, home, speed_factor, cfg, mission, lo
                 except Exception as e:
                     last = f'{type(e).__name__}: {e}'
                     await asyncio.sleep(0.5)
-            result['notes'].append(f'{label} failed after 3 attempts: {last}')
-            return False
+            raise RuntimeError(f'{label} failed after 3 attempts: {last}')   # an unapplied intervention fails the flight
 
         # injection at onset (sim seconds after mission start)
         if cfg['family'] != 'nominal':
             await asyncio.sleep(max(0.0, sim(cfg['onset_s']) - (time.time() - t_start)))
             if cfg['family'] == 'spoof':
                 await d.param.set_param_int('SIM_GPS_SPF_EN', 1)     # onset marker in ULog
+            elif cfg.get('rxmode'):
+                rx = cfg['rxmode']
+                await d.param.set_param_int(rx['param'], rx['value'])           # onset marker: SIM_GPS_USED change
+                await asyncio.sleep(sim(rx['restore_after_s']))
+                await d.param.set_param_int(rx['param'], rx['restore_value'])   # restore marker
             else:
                 await d.param.set_param_int('SYS_FAILURE_EN', 1)     # onset marker in ULog
                 unit = getattr(FailureUnit, cfg['failure']['unit'])
@@ -279,7 +289,8 @@ def verify(ulog_path):
     names = {d.name: d for d in u.data_list}
     info = {'duration_s': round((u.last_timestamp - u.start_timestamp) / 1e6, 1),
             'topics': len(names), 'has_truth': 'vehicle_global_position_groundtruth' in names}
-    onset = [(t, k, v) for (t, k, v) in u.changed_parameters if k in ('SIM_GPS_SPF_EN', 'SYS_FAILURE_EN') and v == 1]
+    onset = [(t, k, v) for (t, k, v) in u.changed_parameters
+             if (k in ('SIM_GPS_SPF_EN', 'SYS_FAILURE_EN') and v == 1) or (k == 'SIM_GPS_USED' and v < 4)]
     info['onset_sim_s'] = round((onset[0][0] - u.start_timestamp) / 1e6, 2) if onset else None
     if info['has_truth'] and 'sensor_gps' in names:
         import numpy as np
@@ -288,6 +299,10 @@ def verify(ulog_path):
         lon_g = g.get('longitude_deg', g.get('lon'))
         if lat_g is not None and np.nanmax(np.abs(lat_g)) > 1000:  # int32 1e7 scaling in older logs
             lat_g, lon_g = lat_g / 1e7, lon_g / 1e7
+        if 'fix_type' in g:
+            keep = np.asarray(g['fix_type']) >= 3
+            g = {k: np.asarray(v)[keep] for k, v in g.items()}
+            lat_g, lon_g = lat_g[keep], lon_g[keep]
         lat_t = np.interp(g['timestamp'], t['timestamp'], t['lat'])
         lon_t = np.interp(g['timestamp'], t['timestamp'], t['lon'])
         dn = (lat_g - lat_t) * 111320.0
@@ -312,6 +327,9 @@ def main():
     ap.add_argument('--speed', type=float, default=4.0)
     ap.add_argument('--seed', type=int, default=20260909)
     ap.add_argument('--families', default=','.join(FAMILIES))
+    ap.add_argument('--only_subtype', default=None, help='force this subtype for every generated flight')
+    ap.add_argument('--seed_scheme', default='hashed', choices=['hashed', 'legacy'],
+                    help='hashed: collision-free namespaced seeds (new runs); legacy: family*100+i (v1/v2 reproduction)')
     args = ap.parse_args()
 
     px4 = pathlib.Path(args.px4)
@@ -331,14 +349,21 @@ def main():
 
     families = args.families.split(',')
     jobs = [(fam, i) for i in range(args.n_per_family) for fam in families]
+    seeds_seen = set()
     for fam, i in jobs:
-        seed = args.seed * 1000 + FAMILIES.index(fam) * 100 + i
+        if args.seed_scheme == 'legacy':
+            seed = args.seed * 1000 + FAMILIES.index(fam) * 100 + i
+        else:
+            tag = f'{args.seed}:{fam}:{args.only_subtype or "any"}:{i}'
+            seed = int(hashlib.sha256(tag.encode()).hexdigest()[:12], 16)
+        assert seed not in seeds_seen, f'seed collision for {fam} {i}'
+        seeds_seen.add(seed)
         rng = random.Random(seed)
         flight_id = f'f{seed}_{fam}'
         if flight_id in done:
             print('skip (done):', flight_id); continue
         home = rng.choice(HOMES)
-        cfg = draw_config(rng, fam)
+        cfg = draw_config(rng, fam, args.only_subtype)
         mission = draw_mission(rng, home)
         print(f'\n=== {flight_id}  subtype={cfg["subtype"]}  onset={cfg["onset_s"]}  home={home[:2]} ===', flush=True)
         log_txt = out / f'{flight_id}.px4.txt'
@@ -349,9 +374,9 @@ def main():
             res = asyncio.run(fly_one(px4_bin, px4_etc, rootfs, home, args.speed, cfg, mission, log_txt, 50040 + (i % 50)))
             res['notes'] = [f'first attempt failed: {first_notes}'] + res['notes']
         rec = {'flight_id': flight_id, 'seed': seed, 'home': home, 'speed_factor': args.speed,
-               'firmware_commit': fw_commit, 'family': fam, 'subtype': cfg['subtype'],
+               'firmware_commit': fw_commit, 'seed_scheme': args.seed_scheme, 'family': fam, 'subtype': cfg['subtype'],
                'onset_s_requested': cfg['onset_s'], 'params': cfg['params'], 'nuisance': cfg['nuisance'],
-               'failure': cfg['failure'], 'mission': mission, 'ok': res['ok'], 'notes': res['notes'],
+               'failure': cfg['failure'], 'rxmode': cfg.get('rxmode'), 'mission': mission, 'ok': res['ok'], 'notes': res['notes'],
                'onset_wall_s': res.get('onset_wall_s')}
         if res['ulog'] is not None:
             dst = out / f'{flight_id}.ulg'

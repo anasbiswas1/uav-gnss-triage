@@ -5,29 +5,33 @@ sih_features.py  --  ULog -> physics-consistency window features (SIH-generated 
 Design rules (from the plan):
   * Simulator truth topics (*_groundtruth) are never read here. Truth lives only in the manifest / verify step.
   * Receiver self-report fields (fix_type, satellites_used, eph, jamming_indicator, noise_per_ms, s_variance)
-    are extracted into a SEPARATE column family (rx_*) so the core detector can exclude them.
+    are extracted into a SEPARATE column family (rx_*) that the core detector excludes. The single exception is
+    fix validity: GPS samples with fix_type < 3 are masked out of the position/velocity channels (an investigator
+    discards no-fix samples too) and the no-fix condition is exposed as gps_nofix_frac. The detector is therefore
+    receiver-blind except for validity masking.
+  * The time grid spans the whole recorded log, not the GPS-valid span, so GPS loss at the start or end of a flight
+    stays visible. Gap-aware interpolation never bridges an outage.
+  * Windows are timestamp-indexed half-open intervals [t, t + 5 s) advanced by exactly 2.5 s.
   * Every feature row carries flight_id so all splits can be flight-grouped.
-  * Window label is onset-aware: before onset a window in an attacked flight is 'nominal'; for gps_degrade and
-    sensor_fault, windows after the restore time are 'nominal' again; spoof persists to the end of the flight.
+  * Window labels are onset-aware, with onset/restore read from the log itself (spoof parameter change,
+    failure-injection messages, SIM_GPS_USED changes for no-fix reporting); the manifest is the fallback.
 
 Usage:
-  python sih_features.py --sih /content/drive/MyDrive/datasets/sih_pilot4 \
-                         --whelan_zip /content/drive/MyDrive/datasets/uav_attack/UAVAttackData.zip \
-                         --out /content/drive/MyDrive/datasets/features_pilot4
+  python sih_features.py --sih <run dir> [--sih <another run dir>] --whelan_zip <UAVAttackData.zip> --out <dir>
 Outputs: <out>/windows.csv, <out>/flights.csv, and a printed inspection + per-label feature summary.
 """
 import argparse
 import json
 import math
 import pathlib
-import sys
+import warnings
 import zipfile
 
 import numpy as np
 import pandas as pd
 
 WIN_S, HOP_S, HZ = 5.0, 2.5, 5.0   # window length, hop, common sample rate
-
+FEATURE_VERSION = 'v3_fullgrid_validity_vecimu_exacthop'
 SKIP_TOPICS = ('groundtruth',)      # never read simulator truth
 
 
@@ -64,19 +68,56 @@ def tsec(d, t0):
 
 
 def interp_to(grid, t, x, max_gap=1.0):
-    """Interpolate x(t) onto grid, but leave NaN wherever the nearest raw sample is farther than max_gap seconds
-    (so sensor outages are preserved instead of bridged)."""
-    if x is None or len(t) < 2:
-        return np.full_like(grid, np.nan)
+    """Linear interpolation onto grid, NaN wherever the nearest valid raw sample is farther than max_gap seconds,
+    so sensor outages are preserved instead of bridged."""
+    if x is None or t is None or len(t) < 2:
+        return np.full_like(grid, np.nan, dtype=float)
     ok = np.isfinite(x)
     if ok.sum() < 2:
-        return np.full_like(grid, np.nan)
+        return np.full_like(grid, np.nan, dtype=float)
     tt, xx = t[ok], x[ok]
     y = np.interp(grid, tt, xx, left=np.nan, right=np.nan)
     j = np.clip(np.searchsorted(tt, grid), 1, len(tt) - 1)
     nearest = np.minimum(np.abs(grid - tt[j - 1]), np.abs(tt[j] - grid))
     y[nearest > max_gap] = np.nan
     return y
+
+
+def hold_to(grid, t, x, max_gap=1.0):
+    """Nearest-sample hold for categorical or step-like fields; NaN beyond max_gap from any raw sample."""
+    if x is None or t is None or len(t) == 0:
+        return np.full_like(grid, np.nan, dtype=float)
+    j = np.clip(np.searchsorted(t, grid), 1, len(t) - 1) if len(t) > 1 else np.zeros(len(grid), dtype=int)
+    if len(t) > 1:
+        left, right = j - 1, j
+        use_right = np.abs(t[right] - grid) < np.abs(grid - t[left])
+        k = np.where(use_right, right, left)
+    else:
+        k = np.zeros(len(grid), dtype=int)
+    y = np.asarray(x, dtype=float)[k]
+    y[np.abs(t[k] - grid) > max_gap] = np.nan
+    return y
+
+
+def presence(grid, t, max_gap):
+    """1 where any raw message lies within max_gap seconds of the grid point, else 0."""
+    if t is None or len(t) == 0:
+        return np.zeros(len(grid))
+    j = np.clip(np.searchsorted(t, grid), 1, len(t) - 1) if len(t) > 1 else np.zeros(len(grid), dtype=int)
+    if len(t) > 1:
+        nearest = np.minimum(np.abs(grid - t[j - 1]), np.abs(t[j] - grid))
+    else:
+        nearest = np.abs(grid - t[0])
+    return (nearest <= max_gap).astype(float)
+
+
+def align_quaternions(q):
+    """Flip signs so consecutive quaternions sit on the same hemisphere (q and -q are the same rotation)."""
+    q = q.copy()
+    for i in range(1, len(q)):
+        if np.dot(q[i], q[i - 1]) < 0:
+            q[i] = -q[i]
+    return q
 
 
 def quat_to_rotm(q):
@@ -91,10 +132,11 @@ def quat_to_rotm(q):
 def build_channels(path, inspect=False):
     u, topics = load_ulog(path)
     t0 = u.start_timestamp
-    out = {'log': path.name, 'duration_s': (u.last_timestamp - t0) / 1e6}
+    duration = (u.last_timestamp - t0) / 1e6
+    out = {'log': path.name, 'duration_s': duration}
 
-    # exact event times from the log: failure-injection messages and the spoof-enable parameter change
-    ev = {'t_inject': np.nan, 't_clear': np.nan, 't_spoof': np.nan}
+    # exact event times from the log
+    ev = {'t_inject': np.nan, 't_clear': np.nan, 't_spoof': np.nan, 't_nofix': np.nan, 't_nofix_clear': np.nan}
     for m in getattr(u, 'logged_messages', []):
         txt = m.message if isinstance(m.message, str) else m.message.decode(errors='ignore')
         if 'Injected:' in txt and np.isnan(ev['t_inject']):
@@ -102,35 +144,48 @@ def build_channels(path, inspect=False):
         elif 'Cleared:' in txt and np.isnan(ev['t_clear']):
             ev['t_clear'] = (m.timestamp - t0) / 1e6
     for (ts_, k, v) in getattr(u, 'changed_parameters', []):
+        tsx = (ts_ - t0) / 1e6
         if k == 'SIM_GPS_SPF_EN' and v == 1 and np.isnan(ev['t_spoof']):
-            ev['t_spoof'] = (ts_ - t0) / 1e6
+            ev['t_spoof'] = tsx
+        if k == 'SIM_GPS_USED' and v < 4 and np.isnan(ev['t_nofix']):
+            ev['t_nofix'] = tsx
+        if k == 'SIM_GPS_USED' and v >= 4 and not np.isnan(ev['t_nofix']) and np.isnan(ev['t_nofix_clear']):
+            ev['t_nofix_clear'] = tsx
     out['events'] = ev
 
     gps_name, gps = first_instance(topics, 'sensor_gps', 'vehicle_gps_position')
     if gps is None:
         raise RuntimeError(f'{path.name}: no GPS topic')
-    lat = col(gps, 'latitude_deg', 'lat')
-    lon = col(gps, 'longitude_deg', 'lon')
-    alt = col(gps, 'altitude_msl_m', 'alt')
-    if np.nanmax(np.abs(lat)) > 1000:          # int32 1e7 degrees, alt in mm (older PX4)
-        lat, lon, alt = lat / 1e7, lon / 1e7, alt / 1e3
-    tg = tsec(gps, t0)
-    lat0, lon0 = lat[np.isfinite(lat)][0], lon[np.isfinite(lon)][0]
-    gN = (lat - lat0) * 111320.0
-    gE = (lon - lon0) * 111320.0 * math.cos(math.radians(lat0))
-    gD = -(alt - alt[np.isfinite(alt)][0])
-    gvN, gvE, gvD = col(gps, 'vel_n_m_s'), col(gps, 'vel_e_m_s'), col(gps, 'vel_d_m_s')
+    # units by field identity: current PX4 publishes degrees, 2020-era PX4 publishes int32 1e7 degrees and mm
+    if 'latitude_deg' in gps.data:
+        lat, lon, alt = col(gps, 'latitude_deg'), col(gps, 'longitude_deg'), col(gps, 'altitude_msl_m')
+    else:
+        lat, lon, alt = col(gps, 'lat') / 1e7, col(gps, 'lon') / 1e7, col(gps, 'alt') / 1e3
+    tg_all = tsec(gps, t0)
+    fix = col(gps, 'fix_type')
+    valid = np.ones(len(tg_all), dtype=bool) if fix is None else (fix >= 3)
+    valid &= np.isfinite(lat) & np.isfinite(lon)
+    if valid.sum() < 2:
+        raise RuntimeError(f'{path.name}: fewer than 2 valid GPS fixes')
+    tg = tg_all[valid]
+    lat0, lon0 = lat[valid][0], lon[valid][0]
+    gN = (lat[valid] - lat0) * 111320.0
+    gE = (lon[valid] - lon0) * 111320.0 * math.cos(math.radians(lat0))
+    gD = -(alt[valid] - alt[valid][0])
+    gvN, gvE, gvD = col(gps, 'vel_n_m_s')[valid], col(gps, 'vel_e_m_s')[valid], col(gps, 'vel_d_m_s')[valid]
 
-    # common grid across the GPS-valid span
-    grid = np.arange(tg[0], tg[-1], 1.0 / HZ)
+    # common grid over the whole recorded log
+    grid = np.arange(0.0, max(duration, 1.0), 1.0 / HZ)
     ch = {'t': grid}
     for k, v in (('gN', gN), ('gE', gE), ('gD', gD), ('gvN', gvN), ('gvE', gvE), ('gvD', gvD)):
         ch[k] = interp_to(grid, tg, v, max_gap=0.6)
-    # receiver self-report channel (kept separate)
-    for k, names in (('rx_eph', ('eph',)), ('rx_sats', ('satellites_used',)), ('rx_fix', ('fix_type',)),
-                     ('rx_jam', ('jamming_indicator',)), ('rx_noise', ('noise_per_ms',)),
-                     ('rx_svar', ('s_variance_m_s',))):
-        ch[k] = interp_to(grid, tg, col(gps, *names), max_gap=0.6)
+    ch['gps_msg'] = presence(grid, tg_all, 0.6)                       # any GPS message present
+    ch['gps_valid'] = hold_to(grid, tg_all, valid.astype(float), 0.6)  # nearest message has a valid fix
+    # receiver self-report channel (kept separate): continuous fields interpolated, categorical fields held
+    for k, names in (('rx_eph', ('eph',)), ('rx_noise', ('noise_per_ms',)), ('rx_svar', ('s_variance_m_s',))):
+        ch[k] = interp_to(grid, tg_all, col(gps, *names), max_gap=0.6)
+    for k, names in (('rx_sats', ('satellites_used',)), ('rx_fix', ('fix_type',)), ('rx_jam', ('jamming_indicator',))):
+        ch[k] = hold_to(grid, tg_all, col(gps, *names), 0.6)
 
     # barometric altitude (GNSS-independent pressure altitude)
     _, air = first_instance(topics, 'vehicle_air_data')
@@ -156,10 +211,15 @@ def build_channels(path, inspect=False):
     if att is not None:
         ta = tsec(att, t0)
         q = np.stack([col(att, 'q[0]'), col(att, 'q[1]'), col(att, 'q[2]'), col(att, 'q[3]')], 1)
+        good = np.all(np.isfinite(q), 1) & (np.abs(np.linalg.norm(q, axis=1) - 1.0) < 0.05)
+        q = align_quaternions(q[good]); ta = ta[good]
+        qi = np.stack([interp_to(grid, ta, q[:, i]) for i in range(4)], 1)
+        nrm = np.linalg.norm(qi, axis=1)
+        qi = qi / np.where(nrm > 0, nrm, np.nan)[:, None]
         for i in range(4):
-            ch[f'q{i}'] = interp_to(grid, ta, q[:, i])
+            ch[f'q{i}'] = qi[:, i]
 
-    # raw IMU, block-averaged to the grid
+    # raw IMU, block-averaged to the grid (a block with no samples stays NaN)
     _, imu = first_instance(topics, 'sensor_combined')
     if imu is not None:
         ti = tsec(imu, t0)
@@ -169,8 +229,7 @@ def build_channels(path, inspect=False):
         for j, k in enumerate(('ax', 'ay', 'az')):
             s = pd.Series(acc[:, j]).groupby(idx).mean()
             ch[k] = s.reindex(range(len(grid))).to_numpy()
-        gnorm = np.linalg.norm(gyr, axis=1)
-        s = pd.Series(gnorm).groupby(idx).std()
+        s = pd.Series(np.linalg.norm(gyr, axis=1)).groupby(idx).std()
         ch['gyro_std'] = s.reindex(range(len(grid))).to_numpy()
 
     # magnetometer norm (derived topic; stops publishing when the sensor is stuck)
@@ -180,7 +239,7 @@ def build_channels(path, inspect=False):
                       col(mag, 'magnetometer_ga[2]', 'z')], 1)
         ch['magNorm'] = interp_to(grid, tsec(mag, t0), np.linalg.norm(m, axis=1))
 
-    # raw sensor topics (logged at low rate, keep publishing constant values when stuck): nearest-sample hold
+    # raw sensor topics (logged at low rate, keep publishing constant values when stuck)
     _, rmag = first_instance(topics, 'sensor_mag')
     if rmag is not None:
         m = np.stack([col(rmag, 'x'), col(rmag, 'y'), col(rmag, 'z')], 1)
@@ -205,7 +264,8 @@ def build_channels(path, inspect=False):
             ch[prefix + k] = interp_to(grid, te, col(e, n))
 
     if inspect:
-        print(f'\n[inspect] {path.name}: GPS topic = {gps_name}, fields = {sorted(gps.data.keys())[:40]}')
+        print(f'\n[inspect] {path.name}: GPS topic = {gps_name}, valid fixes {int(valid.sum())}/{len(valid)}, '
+              f'log duration {duration:.0f}s, fields = {sorted(gps.data.keys())[:40]}')
         for topic in ('vehicle_air_data', 'sensor_baro', 'vehicle_local_position', 'vehicle_attitude',
                       'sensor_combined', 'vehicle_magnetometer', 'sensor_mag', 'estimator_innovations',
                       'estimator_innovation_test_ratios'):
@@ -220,34 +280,38 @@ def build_channels(path, inspect=False):
 def window_features(df):
     t = df['t'].to_numpy()
     dt = 1.0 / HZ
-    feats = []
-    n_win = int(WIN_S * HZ)
-    hop = int(HOP_S * HZ)
     have = set(df.columns)
+    feats = []
+    warnings.simplefilter('ignore', category=RuntimeWarning)
 
-    # precompute rotated IMU acceleration in NED if attitude + IMU are present
-    aN = aE = aD = None
+    # rotated IMU acceleration in NED (gravity removed) where attitude and IMU are present
+    aN = aE = None
     if {'q0', 'q1', 'q2', 'q3', 'ax', 'ay', 'az'} <= have:
         q = df[['q0', 'q1', 'q2', 'q3']].to_numpy()
         a = df[['ax', 'ay', 'az']].to_numpy()
-        aN, aE, aD = np.full(len(df), np.nan), np.full(len(df), np.nan), np.full(len(df), np.nan)
+        aN, aE = np.full(len(df), np.nan), np.full(len(df), np.nan)
         for i in range(len(df)):
             if np.all(np.isfinite(q[i])) and np.all(np.isfinite(a[i])):
                 v = quat_to_rotm(q[i]) @ a[i]
-                aN[i], aE[i], aD[i] = v[0], v[1], v[2] + 9.80665   # remove gravity (NED, D positive down)
+                aN[i], aE[i] = v[0], v[1]
+    integ = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
 
-    import warnings
-    for s in range(0, len(df) - n_win + 1, hop):
-        w = df.iloc[s:s + n_win]
-        f = {'t_start': float(t[s]), 't_end': float(t[s + n_win - 1])}
+    n_windows = int(np.floor((t[-1] - t[0] - WIN_S) / HOP_S)) + 1 if t[-1] - t[0] >= WIN_S else 0
+    for k in range(max(n_windows, 0)):
+        t_s = t[0] + k * HOP_S
+        m = (t >= t_s) & (t < t_s + WIN_S)
+        if m.sum() < int(0.8 * WIN_S * HZ):
+            continue
+        w = df.loc[m]
+        f = {'t_start': float(t_s), 't_end': float(t_s + WIN_S)}
         gN, gE, gD = w['gN'].to_numpy(), w['gE'].to_numpy(), w['gD'].to_numpy()
-        gvN, gvE, gvD = w['gvN'].to_numpy(), w['gvE'].to_numpy(), w['gvD'].to_numpy()
-        f['gps_gap_frac'] = float(np.isnan(gN).mean())      # GPS outage fraction: a feature, not a reason to drop
-        warnings.simplefilter('ignore', category=RuntimeWarning)
+        gvN, gvE = w['gvN'].to_numpy(), w['gvE'].to_numpy()
+        f['gps_gap_frac'] = float(np.isnan(gN).mean())                                 # no valid position
+        f['gps_nofix_frac'] = float(((w['gps_msg'] > 0) & (w['gps_valid'] < 0.5)).mean())  # messages, no fix
+        f['gps_silent_frac'] = float((w['gps_msg'] < 0.5).mean())                      # no messages at all
         gps_ok = np.isfinite(gN)
         if gps_ok.sum() >= 3:
-            # use the first valid fix in the window as the reference for increment features
-            i0 = int(np.argmax(gps_ok))
+            i0 = int(np.argmax(gps_ok)); vi = np.where(gps_ok)[0]
             # 1. GPS position-derivative vs GPS-reported velocity (incoherent spoof, jump)
             dN, dE = np.gradient(gN, dt), np.gradient(gE, dt)
             f['posvel_rms'] = float(np.sqrt(np.nanmean((dN - gvN) ** 2 + (dE - gvE) ** 2)))
@@ -260,13 +324,17 @@ def window_features(df):
             if 'baroAlt' in have:
                 b = w['baroAlt'].to_numpy()
                 f['gps_baro_dz_rms'] = float(np.sqrt(np.nanmean(((-gD - (-gD[i0])) - (b - b[i0])) ** 2)))
-            # 4. GPS velocity change vs integrated IMU acceleration (attitude is EKF-derived: documented dependence)
+            # 4. GPS velocity change vs integrated IMU acceleration, as vectors over the same interval;
+            #    a missing acceleration sample inside the interval leaves the feature undefined (attitude is
+            #    EKF-derived: documented dependence)
             if aN is not None:
-                an, ae = aN[s:s + n_win], aE[s:s + n_win]
-                vi = np.where(gps_ok)[0]
-                dv_gps = np.hypot(gvN[vi[-1]] - gvN[vi[0]], gvE[vi[-1]] - gvE[vi[0]])
-                dv_imu = np.hypot(np.nansum(an[vi[0]:vi[-1] + 1]) * dt, np.nansum(ae[vi[0]:vi[-1] + 1]) * dt)
-                f['dv_gps_minus_imu'] = float(dv_gps - dv_imu)
+                an, ae = aN[m], aE[m]
+                lo, hi = vi[0], vi[-1]
+                seg_n, seg_e = an[lo:hi + 1], ae[lo:hi + 1]
+                if hi > lo and np.all(np.isfinite(seg_n)) and np.all(np.isfinite(seg_e)):
+                    dv_gps = np.array([gvN[hi] - gvN[lo], gvE[hi] - gvE[lo]])
+                    dv_imu = np.array([integ(seg_n, dx=dt), integ(seg_e, dx=dt)])
+                    f['dv_gps_imu_vecdiff'] = float(np.linalg.norm(dv_gps - dv_imu))
                 f['acc_horiz_rms'] = float(np.sqrt(np.nanmean(an ** 2 + ae ** 2)))
             # 5. course over ground vs EKF heading while moving
             if {'q0', 'q1', 'q2', 'q3'} <= have:
@@ -275,16 +343,15 @@ def window_features(df):
                 spd = np.hypot(gvN, gvE)
                 cog = np.arctan2(gvE, gvN)
                 d = np.angle(np.exp(1j * (cog - yaw)))
-                moving = np.isfinite(spd) & (spd > 1.0)
-                f['cog_yaw_absdiff_deg'] = float(np.degrees(np.nanmean(np.abs(d[moving])))) if moving.sum() > 3 else np.nan
+                moving = np.isfinite(spd) & (spd > 1.0) & np.isfinite(d)
+                f['cog_yaw_absdiff_deg'] = float(np.degrees(np.mean(np.abs(d[moving])))) if moving.sum() > 3 else np.nan
             # 6. GPS vs EKF local-position increments (EKF-dependent; large when EKF rejects GPS)
             if {'eN', 'eE'} <= have:
                 eN, eE = w['eN'].to_numpy(), w['eE'].to_numpy()
                 f['gps_ekf_dpos_rms'] = float(np.sqrt(np.nanmean(((gN - gN[i0]) - (eN - eN[i0])) ** 2 + ((gE - gE[i0]) - (eE - eE[i0])) ** 2)))
         else:
-            # (near-)total GPS outage: physics features undefined; gap fraction carries the signal
             if aN is not None:
-                an, ae = aN[s:s + n_win], aE[s:s + n_win]
+                an, ae = aN[m], aE[m]
                 f['acc_horiz_rms'] = float(np.sqrt(np.nanmean(an ** 2 + ae ** 2)))
         # 7. sensor-health statistics (baro/mag faults, vibration)
         if 'baroAlt' in have:
@@ -315,7 +382,7 @@ def window_features(df):
 # ------------------------------------------------------------------ labels
 def window_label(fam, t_start, t_end, onset, restore):
     if fam == 'nominal' or onset is None or np.isnan(onset):
-        return fam if fam != 'nominal' else 'nominal'
+        return fam
     if t_end < onset:
         return 'nominal'
     if restore is not None and not np.isnan(restore) and t_start > restore:
@@ -345,11 +412,14 @@ def main():
             restore = None
             if r.get('failure') and r['failure'].get('restore_after_s') and onset is not None:
                 restore = onset + r['failure']['restore_after_s']
-            jobs.append((folder / r['ulog'], {'flight_id': r['flight_id'], 'source': 'sih', 'family': r['family'],
-                                              'subtype': r['subtype'], 'onset_s': onset, 'restore_s': restore,
-                                              'home_lat': r['home'][0], 'noise_k': r.get('nuisance', {}).get('SIM_GPS_NOISE_K'),
-                                              'noise_t': r.get('nuisance', {}).get('SIM_GPS_NOISE_T'),
-                                              'noise_p': r.get('nuisance', {}).get('SIM_GPS_NOISE_P')}))
+            if r.get('rxmode') and r['rxmode'].get('restore_after_s') and onset is not None:
+                restore = onset + r['rxmode']['restore_after_s']
+            nz = r.get('nuisance', {})
+            jobs.append((folder / r['ulog'], {'flight_id': r['flight_id'], 'source': 'sih', 'run': folder.name,
+                                              'family': r['family'], 'subtype': r['subtype'],
+                                              'onset_s': onset, 'restore_s': restore, 'home_lat': r['home'][0],
+                                              'noise_k': nz.get('SIM_GPS_NOISE_K'), 'noise_t': nz.get('SIM_GPS_NOISE_T'),
+                                              'noise_p': nz.get('SIM_GPS_NOISE_P')}))
     if args.whelan_zip:
         wdir = out / 'whelan_live'; wdir.mkdir(exist_ok=True)
         fam_map = {'benign': 'nominal', 'jamming': 'gps_degrade', 'spoofing': 'spoof'}
@@ -361,17 +431,19 @@ def main():
                         target.write_bytes(z.read(name))
                     fname = pathlib.Path(name).name.lower()
                     fam = next((v for k, v in fam_map.items() if k in fname), 'unknown')
-                    jobs.append((target, {'flight_id': 'whelan_' + target.stem, 'source': 'whelan', 'family': fam,
-                                          'subtype': 'live_' + fam, 'onset_s': np.nan, 'restore_s': np.nan,
+                    jobs.append((target, {'flight_id': 'whelan_' + target.stem, 'source': 'whelan', 'run': 'whelan',
+                                          'family': fam, 'subtype': 'live_' + fam, 'onset_s': np.nan, 'restore_s': np.nan,
                                           'home_lat': np.nan, 'noise_k': np.nan, 'noise_t': np.nan, 'noise_p': np.nan}))
 
     rows, flights = [], []
-    for i, (path, meta) in enumerate(jobs):
+    seen_sources = set()
+    for path, meta in jobs:
         try:
-            chd = build_channels(path, inspect=(i == 0 or meta['source'] == 'whelan' and not any(f['source'] == 'whelan' for f in flights)))
+            chd = build_channels(path, inspect=(meta['source'] not in seen_sources))
         except Exception as e:
             print(f'SKIP {path.name}: {type(e).__name__}: {e}')
             continue
+        seen_sources.add(meta['source'])
         wf = window_features(chd['ch'])
         ev = chd['events']
         onset, restore = meta['onset_s'], meta['restore_s']
@@ -379,10 +451,14 @@ def main():
             if meta['family'] == 'spoof' and not np.isnan(ev['t_spoof']):
                 onset = ev['t_spoof']
             elif meta['family'] in ('gps_degrade', 'sensor_fault'):
-                if not np.isnan(ev['t_inject']):
-                    onset = ev['t_inject']
-                if not np.isnan(ev['t_clear']):
-                    restore = ev['t_clear']
+                if not np.isnan(ev['t_nofix']):
+                    onset = ev['t_nofix']
+                    restore = ev['t_nofix_clear'] if not np.isnan(ev['t_nofix_clear']) else restore
+                else:
+                    if not np.isnan(ev['t_inject']):
+                        onset = ev['t_inject']
+                    if not np.isnan(ev['t_clear']):
+                        restore = ev['t_clear']
         meta = {**meta, 'onset_s': onset, 'restore_s': restore}
         for k, v in meta.items():
             wf[k] = v
@@ -394,15 +470,17 @@ def main():
 
     W = pd.concat(rows, ignore_index=True)
     F = pd.DataFrame(flights)
+    W.attrs['feature_version'] = FEATURE_VERSION
     W.to_csv(out / 'windows.csv', index=False)
     F.to_csv(out / 'flights.csv', index=False)
-    print(f'\nwrote {len(W)} windows from {len(F)} flights ->', out)
+    (out / 'feature_version.txt').write_text(FEATURE_VERSION + '\n')
+    print(f'\nwrote {len(W)} windows from {len(F)} flights ->', out, '| feature version', FEATURE_VERSION)
 
-    key = ['gps_gap_frac', 'posvel_rms', 'step_minus_vel_max', 'gps_baro_dz_rms', 'dv_gps_minus_imu',
-           'gps_ekf_dpos_rms', 'baro_gap_frac', 'baro_raw_std', 'mag_gap_frac', 'mag_raw_std',
-           'tr_gpsHpos0_absmax', 'tr_gpsHvel0_absmax', 'tr_baroVpos_absmax', 'tr_heading_absmax', 'rx_jam_mean']
+    key = ['gps_gap_frac', 'gps_nofix_frac', 'gps_silent_frac', 'posvel_rms', 'step_minus_vel_max', 'gps_baro_dz_rms',
+           'dv_gps_imu_vecdiff', 'gps_ekf_dpos_rms', 'baro_gap_frac', 'baro_raw_std', 'mag_gap_frac', 'mag_raw_std',
+           'tr_gpsHpos0_absmax', 'tr_baroVpos_absmax', 'tr_heading_absmax', 'rx_jam_mean']
     key = [k for k in key if k in W.columns]
-    pd.set_option('display.width', 220); pd.set_option('display.max_columns', 40)
+    pd.set_option('display.width', 240); pd.set_option('display.max_columns', 40)
     print('\nMedian of key features by (source, window_label):')
     print(W.groupby(['source', 'window_label'])[key].median().round(3).to_string())
     print('\nWindows per (source, family, window_label):')
