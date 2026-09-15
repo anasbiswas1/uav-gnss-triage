@@ -1,0 +1,16 @@
+feature,importance
+baro_gap_frac_rmax3,0.11281965
+mag_gap_frac_rmax3,0.094303474
+gps_ekf_dpos_rms_rel,0.06886881
+gps_gap_frac_d1,0.03917718
+gps_baro_dz_rms_d1,0.036714766
+baro_gap_frac,0.034767594
+gps_gap_frac_rmax3,0.029274248
+gps_ekf_dpos_rms,0.027145319
+mag_norm_mean_rel,0.027003866
+gps_baro_dz_rms,0.024259875
+gps_gap_frac,0.018324196
+gps_nofix_frac_rmax3,0.016766194
+step_speed_max,0.016527344
+mag_gap_frac,0.015687063
+mag_raw_std,0.0133739505

@@ -1,0 +1,9 @@
+Held-out family,Held-out subtype,n,Fine accuracy,Coarse accuracy,Mean confidence,Fine coverage (0.10),Fine abstention (0.10),Coarse coverage (0.10),Coarse abstention (0.10),Predicted as
+Spoof,drift_coherent,17,0.4117647058823529,0.4117647058823529,0.7009999728588394,0.4705882352941176,0.0588235294117647,0.1764705882352941,0.2352941176470588,"{""nominal"": 10, ""spoof"": 7}"
+Spoof,drift_incoherent,22,0.3181818181818182,1.0,0.7523420883968254,0.4090909090909091,0.1818181818181818,1.0,0.0,"{""gps_degrade"": 15, ""spoof"": 7}"
+Spoof,jump,21,0.238095238095238,0.5714285714285714,0.6510467785301027,0.238095238095238,0.2857142857142857,0.3809523809523809,0.1904761904761904,"{""nominal"": 9, ""gps_degrade"": 7, ""spoof"": 5}"
+GNSS degradation,no_fix_then_ok,30,1.0,1.0,0.9188723930202468,0.8333333333333334,0.1666666666666666,1.0,0.0,"{""gps_degrade"": 30}"
+GNSS degradation,off_then_ok,32,0.0,0.0,0.9999864852666158,0.0,0.0,0.0,0.0,"{""nominal"": 32}"
+GNSS degradation,stuck_then_ok,28,0.0,0.7857142857142857,0.9732008947527404,0.0,0.0,0.7857142857142857,0.0,"{""spoof"": 22, ""sensor_fault"": 6}"
+Sensor fault,baro_stuck,29,0.0,0.0,0.8574405945496077,0.0,0.0344827586206896,0.0,0.0,"{""spoof"": 28, ""gps_degrade"": 1}"
+Sensor fault,mag_stuck,31,0.0,0.0,0.9945212599223268,0.0,0.0,0.0,0.0,"{""gps_degrade"": 31}"

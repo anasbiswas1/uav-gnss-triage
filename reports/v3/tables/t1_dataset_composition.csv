@@ -1,0 +1,10 @@
+family,subtype,flights,median_duration_s,min_duration_s,max_duration_s
+GNSS degradation,no_fix_then_ok,30,238.2,64.2,378.5
+GNSS degradation,off_then_ok,32,250.05,61.5,427.2
+GNSS degradation,stuck_then_ok,28,285.85,124.4,454.6
+Nominal,none,60,223.25,140.6,370.7
+Sensor fault,baro_stuck,29,220.2,116.7,335.9
+Sensor fault,mag_stuck,31,207.0,142.9,328.3
+Spoof,drift_coherent,17,223.8,168.0,553.7
+Spoof,drift_incoherent,22,238.4,163.3,303.3
+Spoof,jump,21,215.4,167.3,348.0

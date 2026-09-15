@@ -1,0 +1,4 @@
+Log,Reference label,Verdict,Confidence,Set (0.10),Set (0.20),Coarse verdict,Coarse set (0.10)
+Benign,Nominal,Nominal,0.9740855112596768,nominal,nominal,Nominal,nominal
+Jamming,GNSS degradation,Sensor fault,0.5389594275157991,nominal,(empty),Non-GNSS fault,nominal
+Spoofing,Spoof,Nominal,0.984090971769945,nominal,nominal,Nominal,nominal

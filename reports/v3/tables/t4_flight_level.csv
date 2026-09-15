@@ -1,0 +1,3 @@
+Aggregation,Flight accuracy,Flight macro-F1,AURC,Coarse accuracy,Coarse macro-F1
+Percentile rule,0.627 ± 0.047,0.630 ± 0.045,0.207 ± 0.047,0.725 ± 0.040,0.685 ± 0.038
+Stacked,0.927 ± 0.033,0.909 ± 0.036,0.019 ± 0.018,0.945 ± 0.015,0.933 ± 0.018
