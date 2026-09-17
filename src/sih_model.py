@@ -13,13 +13,19 @@ and consistency residuals), and a regularised multinomial logistic model is fitt
 The percentile rule from the first version is kept as a comparison ("rule" vs "stacked").
 
 Experiments
-  E0  Leakage audit: random-window split vs flight-grouped split (window level).
-  E1  In-distribution, flight-grouped: 20 train / 20 calibration / 20 test flights per family, R repetitions.
-      Window metrics raw vs temperature-scaled; flight accuracy for rule and stacked aggregation; class-conditional
-      conformal sets at the flight level (alpha 0.10 and 0.20; with 20 calibration flights per class alpha 0.05 would
-      use the largest calibration score, the most conservative finite threshold, so it is not reported); risk-coverage and AURC.
-  E2  Leave-one-subtype-out with the stacked pipeline.
-  E3  Whelan live logs as external case studies.
+  E0  Leakage audit, paired: per repetition, a flight-grouped split (30 training flights per family) and a random-window
+      split with the same number of training windows, same detector; per-rep difference reported.
+  E1  In-distribution, flight-grouped: 20 train / 20 calibration / 20 test flights per family (balanced test so the
+      within-coarse-class mixture matches calibration), R repetitions; extra flights beyond 20 per family are scored
+      separately. Window metrics raw vs temperature-scaled; flight-level accuracy, macro-F1, AURC and probability
+      calibration (ECE, NLL, Brier) for the rule and for three stacked variants (probability summaries only, raw flight
+      features only, full); a sensitivity variant without the derived-topic gap features; class-conditional conformal sets
+      at the flight level (alpha 0.10 and 0.20) with abstention decomposed into multi-label, empty, non-singleton and
+      operational (non-singleton or verdict outside its set).
+  E2  Leave-one-subtype-out with the full stacked pipeline, with the split allocation and conformal ranks exported and a
+      matched-size seen-subtype control for every hold-out.
+  E3  Whelan live logs as case studies: verdicts, sets, window timeline, receiver-derived disturbance intervals and a
+      declared alert rule with detection delay and false alerts.
 
 Rules: receiver self-report (rx_*) columns are excluded from the detector. Simulator truth is never used.
 Usage:
@@ -237,6 +243,7 @@ def stacked_pipeline(W_tr, feats, seed, n_folds=4):
     agg_cols = [c for c in A_tr.columns if c not in ('flight_id', 'family', 'subtype')]
     fmodel = fit(make_flight_model(seed), A_tr[agg_cols], A_tr['family'])
     wmodel = fit(make_xgb(seed), W_tr[feats], W_tr['window_label'])
+    stacked_pipeline.last_oof = P_oof
     return wmodel, fmodel, agg_cols, T
 
 
@@ -247,6 +254,19 @@ def stacked_scores(W, P, fmodel, agg_cols):
     for i, c in enumerate(CLASSES):
         S[f'q_{c}'] = Q[:, i]
     return finish_scores(S)
+
+
+PROB_COLS = lambda cols: [c for c in cols if c.split('_')[0] in ('max', 'p90', 'mean', 'frac', 'run')]
+RAW_COLS = lambda cols: [c for c in cols if c not in PROB_COLS(cols)]
+
+
+def flight_calibration(S, level='fine'):
+    """Probability calibration of the flight-level probabilities (10 equal-width bins for ECE)."""
+    if level == 'fine':
+        Q = S[[f'q_{c}' for c in CLASSES]].to_numpy(); y = np.array([CLASSES.index(v) for v in S['family']])
+    else:
+        Q = S[[f'qc_{c}' for c in COARSE_CLASSES]].to_numpy(); y = np.array([COARSE_CLASSES.index(v) for v in S['coarse_family']])
+    return {'ece10': ece_top(Q, y, bins=10), 'nll': nll(Q, y), 'brier': brier(Q, y)}
 
 
 # ------------------------------------------------------------------ conformal and selective prediction
@@ -279,10 +299,15 @@ def conformal_report(S_test, th, tag, level='fine'):
         if not m.any():
             continue
         sel = [s for s, mm in zip(sets, m) if mm]
+        preds = S_test.loc[m, 'pred' if level == 'fine' else 'coarse_pred'].tolist()
         out.append({'tag': tag, 'level': level, 'family': c, 'coverage': float(np.mean([c in s for s in sel])),
                     'avg_set_size': float(np.mean([len(s) for s in sel])),
-                    'abstain_rate': float(np.mean([len(s) != 1 for s in sel])),
-                    'empty_rate': float(np.mean([len(s) == 0 for s in sel])), 'n': int(m.sum())})
+                    'multi_label_rate': float(np.mean([len(s) > 1 for s in sel])),
+                    'empty_rate': float(np.mean([len(s) == 0 for s in sel])),
+                    'non_singleton_rate': float(np.mean([len(s) != 1 for s in sel])),
+                    'verdict_outside_set_rate': float(np.mean([p not in s for p, s in zip(preds, sel)])),
+                    'operational_abstain_rate': float(np.mean([(len(s) != 1) or (p not in s) for p, s in zip(preds, sel)])),
+                    'n': int(m.sum())})
     return pd.DataFrame(out), sets
 
 
@@ -296,12 +321,15 @@ def risk_coverage(S):
 
 
 # ------------------------------------------------------------------ helpers
-def split_flights(F, rng, n_train=20, n_cal=20):
-    tr, ca, te = [], [], []
+def split_flights(F, rng, n_train=20, n_cal=20, n_test=20):
+    """Per family: n_train training, n_cal calibration, n_test test flights; anything left over is 'extra' and is scored
+    separately so the primary test set has the same per-class mixture as the calibration set."""
+    tr, ca, te, ex = [], [], [], []
     for c in CLASSES:
         ids = F.loc[F.family == c, 'flight_id'].tolist(); rng.shuffle(ids)
-        tr += ids[:n_train]; ca += ids[n_train:n_train + n_cal]; te += ids[n_train + n_cal:]
-    return set(tr), set(ca), set(te)
+        tr += ids[:n_train]; ca += ids[n_train:n_train + n_cal]
+        te += ids[n_train + n_cal:n_train + n_cal + n_test]; ex += ids[n_train + n_cal + n_test:]
+    return set(tr), set(ca), set(te), set(ex)
 
 
 def window_metrics(P, y, tag):
@@ -319,7 +347,9 @@ def main():
     ap.add_argument('--features', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--reps', type=int, default=5)
+    ap.add_argument('--only', default='all', help='comma-separated subset of e0,e1,e2,e3 to run (others are skipped; existing files kept)')
     args = ap.parse_args()
+    RUN = set(['e0', 'e1', 'e2', 'e3']) if args.only == 'all' else set(args.only.split(','))
     fdir, out = pathlib.Path(args.features), pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -332,54 +362,91 @@ def main():
     print('SIH windows:', len(Ws), '| flights:', len(F), '| Whelan windows:', len(Ww))
     print('window labels:', Ws.window_label.value_counts().to_dict())
 
-    # ---------------- E0 leakage audit
-    rng = np.random.RandomState(0)
-    idx = rng.permutation(len(Ws)); half = len(Ws) // 2
-    m = fit(make_xgb(0), Ws.loc[idx[:half], feats], Ws.loc[idx[:half], 'window_label'])
-    e0_rand = window_metrics(predict_proba(m, Ws.loc[idx[half:], feats]), Ws.loc[idx[half:], 'window_label'], 'random_window_split')
-    tr, ca, te = split_flights(F, np.random.RandomState(0), n_train=30, n_cal=0)
-    m = fit(make_xgb(0), sub(Ws, tr)[feats], sub(Ws, tr)['window_label'])
-    e0_grp = window_metrics(predict_proba(m, sub(Ws, te)[feats]), sub(Ws, te)['window_label'], 'flight_grouped_split')
-    E0 = pd.DataFrame([e0_rand, e0_grp]); E0.to_csv(out / 'e0_leakage_audit.csv', index=False)
-    print('\n[E0] leakage audit (window-level):\n', E0.round(4).to_string(index=False))
+    # ---------------- E0 leakage audit, paired with matched training-window counts
+    e0 = []
+    for rep in (range(args.reps) if 'e0' in RUN else []):
+        rng = np.random.RandomState(500 + rep)
+        tr, ca, te, ex = split_flights(F, rng, n_train=30, n_cal=0, n_test=10 ** 6)
+        W_tr, W_te = sub(Ws, tr), sub(Ws, te)
+        m = fit(make_xgb(rep), W_tr[feats], W_tr['window_label'])
+        g = window_metrics(predict_proba(m, W_te[feats]), W_te['window_label'], 'flight_grouped_split'); g['rep'] = rep; g['n_train_windows'] = len(W_tr)
+        idx = rng.permutation(len(Ws)); k = len(W_tr)
+        m = fit(make_xgb(rep), Ws.loc[idx[:k], feats], Ws.loc[idx[:k], 'window_label'])
+        r = window_metrics(predict_proba(m, Ws.loc[idx[k:], feats]), Ws.loc[idx[k:], 'window_label'], 'random_window_split'); r['rep'] = rep; r['n_train_windows'] = k
+        e0 += [g, r]
+    if e0:
+        E0 = pd.DataFrame(e0); E0.to_csv(out / 'e0_leakage_audit.csv', index=False)
+        piv = E0.pivot(index='rep', columns='tag', values='acc'); d = piv['random_window_split'] - piv['flight_grouped_split']
+        print('\n[E0] leakage audit (window-level), mean over paired reps:\n', E0.groupby('tag')[['acc', 'macro_f1', 'ece', 'nll', 'brier']].mean().round(4).to_string())
+        print(f'[E0] paired accuracy difference random - grouped: {d.mean():.4f} ± {d.std(ddof=0):.4f} over {len(d)} reps')
 
     # ---------------- E1 in-distribution, flight-grouped, repeated
-    wm, fm, cf, rc_all = [], [], [], []
-    for rep in range(args.reps):
+    GAP_FEATS = [c for c in feats if c.startswith('baro_gap_frac') or c.startswith('mag_gap_frac')]
+    feats_nogap = [c for c in feats if c not in GAP_FEATS]
+    wm, fm, cf, rc_all, extra_rows = [], [], [], [], []
+    for rep in (range(args.reps) if 'e1' in RUN else []):
         rng = np.random.RandomState(100 + rep)
-        tr, ca, te = split_flights(F, rng)
-        W_tr, W_ca, W_te = sub(Ws, tr), sub(Ws, ca), sub(Ws, te)
-        for name, mk in (('xgb', make_xgb), ('logreg', make_logreg)):
-            model = fit(mk(rep), W_tr[feats], W_tr['window_label'])
-            P_te = predict_proba(model, W_te[feats])
-            T = fit_temperature(oof_probs(mk, W_tr, feats, rep), np.array([CLASSES.index(v) for v in W_tr['window_label']]))
-            wm.append({'rep': rep, 'model': name, 'T': T, **window_metrics(P_te, W_te['window_label'], 'raw')})
-            wm.append({'rep': rep, 'model': name, 'T': T, **window_metrics(apply_temperature(P_te, T), W_te['window_label'], 'temp_scaled')})
+        tr, ca, te, ex = split_flights(F, rng)
+        W_tr, W_ca, W_te, W_ex = sub(Ws, tr), sub(Ws, ca), sub(Ws, te), sub(Ws, ex)
+        # full stacked pipeline (its out-of-fold window probabilities also give the temperature for the window and rule branches)
         wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, rep)
-        P_cal, P_te = predict_proba(wmodel, W_ca[feats]), predict_proba(wmodel, W_te[feats])
+        for name, mk in (('xgb', make_xgb), ('logreg', make_logreg)):
+            model = wmodel if name == 'xgb' else fit(mk(rep), W_tr[feats], W_tr['window_label'])
+            P_te = predict_proba(model, W_te[feats])
+            T_m = T if name == 'xgb' else fit_temperature(oof_probs(mk, W_tr, feats, rep), np.array([CLASSES.index(v) for v in W_tr['window_label']]))
+            wm.append({'rep': rep, 'model': name, 'T': T_m, **window_metrics(P_te, W_te['window_label'], 'raw')})
+            wm.append({'rep': rep, 'model': name, 'T': T_m, **window_metrics(apply_temperature(P_te, T_m), W_te['window_label'], 'temp_scaled')})
+        P_oof = stacked_pipeline.last_oof
+        A_tr = flight_aggregates(W_tr, P_oof)
+        f_probs = fit(make_flight_model(rep), A_tr[PROB_COLS(agg_cols)], A_tr['family'])
+        f_raw = fit(make_flight_model(rep), A_tr[RAW_COLS(agg_cols)], A_tr['family'])
+        P_cal, P_te, P_ex = predict_proba(wmodel, W_ca[feats]), predict_proba(wmodel, W_te[feats]), (predict_proba(wmodel, W_ex[feats]) if len(W_ex) else None)
         P_cal_t, P_te_t = apply_temperature(P_cal, T), apply_temperature(P_te, T)
+        # sensitivity: full stacked pipeline without the derived-topic gap features
+        wmodel_ng, fmodel_ng, agg_cols_ng, _ = stacked_pipeline(W_tr, feats_nogap, rep)
+        variants = {
+            'rule': (rule_scores(flight_aggregates(W_ca, P_cal_t)), rule_scores(flight_aggregates(W_te, P_te_t)),
+                     rule_scores(flight_aggregates(W_ex, apply_temperature(P_ex, T))) if len(W_ex) else None),
+            'stacked_probs_only': (None, None, None), 'stacked_raw_only': (None, None, None),
+            'stacked': (stacked_scores(W_ca, P_cal, fmodel, agg_cols), stacked_scores(W_te, P_te, fmodel, agg_cols),
+                        stacked_scores(W_ex, P_ex, fmodel, agg_cols) if len(W_ex) else None),
+            'stacked_no_gap': (stacked_scores(W_ca, predict_proba(wmodel_ng, W_ca[feats_nogap]), fmodel_ng, agg_cols_ng),
+                               stacked_scores(W_te, predict_proba(wmodel_ng, W_te[feats_nogap]), fmodel_ng, agg_cols_ng), None),
+        }
+        for tag, fm_, cols in (('stacked_probs_only', f_probs, PROB_COLS(agg_cols)), ('stacked_raw_only', f_raw, RAW_COLS(agg_cols))):
+            def sc(W, P):
+                A = flight_aggregates(W, P); S = A[['flight_id', 'family', 'subtype']].copy(); Q = predict_proba(fm_, A[cols])
+                for i, c in enumerate(CLASSES):
+                    S[f'q_{c}'] = Q[:, i]
+                return finish_scores(S)
+            variants[tag] = (sc(W_ca, P_cal), sc(W_te, P_te), None)
         thresholds = {}
-        for agg in ('rule', 'stacked'):
-            if agg == 'rule':
-                S_cal, S_te = rule_scores(flight_aggregates(W_ca, P_cal_t)), rule_scores(flight_aggregates(W_te, P_te_t))
-            else:
-                S_cal, S_te = stacked_scores(W_ca, P_cal, fmodel, agg_cols), stacked_scores(W_te, P_te, fmodel, agg_cols)
+        for agg, (S_cal, S_te, S_ex) in variants.items():
             rcurve, aurc = risk_coverage(S_te)
+            cal_f, cal_c = flight_calibration(S_te, 'fine'), flight_calibration(S_te, 'coarse')
             fm.append({'rep': rep, 'aggregation': agg, 'flight_acc': accuracy_score(S_te.family, S_te.pred),
                        'flight_macro_f1': f1_score(S_te.family, S_te.pred, average='macro'), 'aurc': aurc,
                        'coarse_acc': accuracy_score(S_te.coarse_family, S_te.coarse_pred),
-                       'coarse_macro_f1': f1_score(S_te.coarse_family, S_te.coarse_pred, average='macro')})
-            for alpha in (0.10, 0.20):
-                for level in ('fine', 'coarse'):
-                    th = conformal_thresholds(S_cal, alpha, level)
-                    thresholds[f'{agg}_{level}_alpha{alpha}'] = th
-                    rep_df, sets = conformal_report(S_te, th, f'{agg}_alpha{alpha}', level)
-                    rep_df['rep'] = rep; rep_df['aggregation'] = agg; rep_df['alpha'] = alpha
-                    cf.append(rep_df)
-                    S_te[f'set_{level}_a{alpha}'] = [','.join(x) for x in sets]
+                       'coarse_macro_f1': f1_score(S_te.coarse_family, S_te.coarse_pred, average='macro'),
+                       'flight_ece10': cal_f['ece10'], 'flight_nll': cal_f['nll'], 'flight_brier': cal_f['brier'],
+                       'coarse_ece10': cal_c['ece10'], 'coarse_nll': cal_c['nll'], 'coarse_brier': cal_c['brier']})
             rcurve['rep'] = rep; rcurve['aggregation'] = agg; rc_all.append(rcurve)
-            S_te.assign(rep=rep, aggregation=agg).to_csv(out / f'e1_rep{rep}_{agg}_flight_scores.csv', index=False)
-            S_cal.assign(rep=rep, aggregation=agg).to_csv(out / f'e1_rep{rep}_{agg}_calibration_scores.csv', index=False)
+            if agg in ('rule', 'stacked'):
+                for alpha in (0.10, 0.20):
+                    for level in ('fine', 'coarse'):
+                        th = conformal_thresholds(S_cal, alpha, level)
+                        thresholds[f'{agg}_{level}_alpha{alpha}'] = th
+                        rep_df, sets = conformal_report(S_te, th, f'{agg}_alpha{alpha}', level)
+                        rep_df['rep'] = rep; rep_df['aggregation'] = agg; rep_df['alpha'] = alpha
+                        cf.append(rep_df)
+                        S_te[f'set_{level}_a{alpha}'] = [','.join(x) for x in sets]
+                        if S_ex is not None and len(S_ex):
+                            ex_df, _ = conformal_report(S_ex, th, f'{agg}_alpha{alpha}', level)
+                            ex_df['rep'] = rep; ex_df['aggregation'] = agg; ex_df['alpha'] = alpha
+                            ex_df['acc'] = accuracy_score(S_ex.family, S_ex.pred) if level == 'fine' else accuracy_score(S_ex.coarse_family, S_ex.coarse_pred)
+                            extra_rows.append(ex_df)
+                S_te.assign(rep=rep, aggregation=agg).to_csv(out / f'e1_rep{rep}_{agg}_flight_scores.csv', index=False)
+                S_cal.assign(rep=rep, aggregation=agg).to_csv(out / f'e1_rep{rep}_{agg}_calibration_scores.csv', index=False)
         (out / f'e1_rep{rep}_thresholds.json').write_text(json.dumps(thresholds, indent=1))
         if rep == 0:
             imp = getattr(wmodel, 'feature_importances_', None)
@@ -389,53 +456,98 @@ def main():
             lr = fmodel[-1]
             pd.DataFrame(lr.coef_, index=[CLASSES[int(i)] for i in lr.classes_], columns=agg_cols).T\
                 .to_csv(out / 'e1_rep0_flight_model_coefficients.csv')
-    WM, FM, CF = pd.DataFrame(wm), pd.DataFrame(fm), pd.concat(cf, ignore_index=True)
-    WM.to_csv(out / 'e1_window_metrics.csv', index=False); FM.to_csv(out / 'e1_flight_metrics.csv', index=False)
-    CF.to_csv(out / 'e1_conformal.csv', index=False); pd.concat(rc_all).to_csv(out / 'e1_risk_coverage.csv', index=False)
-    print('\n[E1] window metrics, mean over reps:\n', WM.groupby(['model', 'tag'])[['acc', 'macro_f1', 'ece', 'nll', 'brier']].mean().round(4).to_string())
-    print('\n[E1] flight-level, mean (std) over reps:\n', FM.groupby('aggregation')[['flight_acc', 'flight_macro_f1', 'aurc', 'coarse_acc', 'coarse_macro_f1']].agg(['mean', 'std']).round(3).to_string())
-    print('\n[E1] class-conditional conformal at flight level, mean over reps:\n',
-          CF.groupby(['aggregation', 'level', 'alpha', 'family'])[['coverage', 'avg_set_size', 'abstain_rate', 'empty_rate']].mean().round(3).to_string())
+    if not wm:
+        WM = FM = CF = None
+    else:
+        WM, FM, CF = pd.DataFrame(wm), pd.DataFrame(fm), pd.concat(cf, ignore_index=True)
+    if WM is not None:
+        WM.to_csv(out / 'e1_window_metrics.csv', index=False); FM.to_csv(out / 'e1_flight_metrics.csv', index=False)
+    if WM is not None:
+        CF.to_csv(out / 'e1_conformal.csv', index=False); pd.concat(rc_all).to_csv(out / 'e1_risk_coverage.csv', index=False)
+    if extra_rows:
+        pd.concat(extra_rows, ignore_index=True).to_csv(out / 'e1_extra_flights.csv', index=False)
+    if WM is not None:
+        print('\n[E1] window metrics, mean over reps:\n', WM.groupby(['model', 'tag'])[['acc', 'macro_f1', 'ece', 'nll', 'brier']].mean().round(4).to_string())
+        print('\n[E1] flight-level, mean (std) over reps:\n', FM.groupby('aggregation')[['flight_acc', 'flight_macro_f1', 'aurc', 'coarse_acc', 'coarse_macro_f1']].agg(['mean', 'std']).round(3).to_string())
+        print('\n[E1] flight-level probability calibration, mean over reps:\n', FM.groupby('aggregation')[['flight_ece10', 'flight_nll', 'flight_brier', 'coarse_ece10', 'coarse_nll', 'coarse_brier']].mean().round(3).to_string())
+        print('\n[E1] class-conditional conformal at flight level, mean (std) over reps:\n',
+              CF.groupby(['aggregation', 'level', 'alpha', 'family'])[['coverage', 'avg_set_size', 'multi_label_rate', 'empty_rate', 'non_singleton_rate', 'verdict_outside_set_rate', 'operational_abstain_rate']].agg(['mean', 'std']).round(3).to_string())
+    if extra_rows:
+        EX = pd.concat(extra_rows, ignore_index=True)
+        print('\n[E1] extra flights beyond the balanced test set (scored with the same thresholds), mean over reps:\n',
+              EX.groupby(['aggregation', 'level', 'alpha', 'family'])[['n', 'acc', 'coverage', 'operational_abstain_rate']].mean().round(3).to_string())
 
-    # ---------------- E2 leave-one-subtype-out (stacked pipeline)
-    loso = []
-    for fam in CLASSES[1:]:
+    # ---------------- E2 leave-one-subtype-out (stacked pipeline) with allocation export and matched control
+    def allocate(F_in, rng):
+        tr, ca, alloc = [], [], {}
+        for c in CLASSES:
+            ids = F_in.loc[F_in.family == c, 'flight_id'].tolist(); rng.shuffle(ids)
+            n_tr = min(20, len(ids) // 2); n_ca = min(20, len(ids) - n_tr)
+            tr += ids[:n_tr]; ca += ids[n_tr:n_tr + n_ca]; alloc[c] = (n_tr, n_ca)
+        return tr, ca, alloc
+
+    def evaluate_holdout(W_tr, W_ca, W_h, fam, seed):
+        wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, seed)
+        S_cal = stacked_scores(W_ca, predict_proba(wmodel, W_ca[feats]), fmodel, agg_cols)
+        S_h = stacked_scores(W_h, predict_proba(wmodel, W_h[feats]), fmodel, agg_cols)
+        cfam = COARSE[fam]
+        row = {'n': len(S_h), 'acc': float((S_h.pred == fam).mean()), 'coarse_acc': float((S_h.coarse_pred == cfam).mean()),
+               'pred_dist': json.dumps(S_h.pred.value_counts().to_dict()), 'mean_conf': float(S_h.conf.mean())}
+        for alpha in (0.10, 0.20):
+            th = conformal_thresholds(S_cal, alpha); sets = conformal_sets(S_h, th)
+            row[f'coverage_a{alpha}'] = float(np.mean([fam in x for x in sets]))
+            row[f'operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S_h.pred, sets)]))
+            thc = conformal_thresholds(S_cal, alpha, 'coarse'); csets = conformal_sets(S_h, thc, 'coarse')
+            row[f'coarse_coverage_a{alpha}'] = float(np.mean([cfam in x for x in csets]))
+            row[f'coarse_operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S_h.coarse_pred, csets)]))
+        return row, S_h
+
+    loso, splits = [], []
+    for fam in (CLASSES[1:] if 'e2' in RUN else []):
         for st in sorted(F.loc[F.family == fam, 'subtype'].unique()):
             held = set(F.loc[F.subtype == st, 'flight_id'])
             F_in = F[~F.flight_id.isin(held)]
             rng = np.random.RandomState(7)
-            tr, ca = [], []
+            tr, ca, alloc = allocate(F_in, rng)
+            row_h, S_h = evaluate_holdout(sub(Ws, tr), sub(Ws, ca), sub(Ws, held), fam, 7)
+            # matched-size control: withhold the same number of flights from the SEEN subtypes of the same family,
+            # allocate train/calibration from the remainder with the same rule, evaluate on the withheld seen flights
+            # control size is the held-out size capped at half of the seen flights, so that every seen subtype keeps at least
+            # half of its flights in training and the control never degenerates into an unseen-subtype test
+            seen = F[(F.family == fam) & (F.subtype != st)]
+            ctrl = set()
+            for st2, d2 in seen.groupby('subtype'):
+                ids2 = d2['flight_id'].tolist(); np.random.RandomState(7).shuffle(ids2)
+                ctrl |= set(ids2[:len(ids2) // 2])
+            ctrl = set(sorted(ctrl)[:len(held)]) if len(ctrl) > len(held) else ctrl
+            F_in_c = F[~F.flight_id.isin(ctrl)]
+            tr_c, ca_c, alloc_c = allocate(F_in_c, np.random.RandomState(7))
+            row_c, _ = evaluate_holdout(sub(Ws, tr_c), sub(Ws, ca_c), sub(Ws, ctrl), fam, 7)
             for c in CLASSES:
-                ids = F_in.loc[F_in.family == c, 'flight_id'].tolist(); rng.shuffle(ids)
-                n_tr = min(20, len(ids) // 2); n_ca = min(20, len(ids) - n_tr)
-                tr += ids[:n_tr]; ca += ids[n_tr:n_tr + n_ca]
-            W_tr, W_ca, W_h = sub(Ws, tr), sub(Ws, ca), sub(Ws, held)
-            wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 7)
-            S_cal = stacked_scores(W_ca, predict_proba(wmodel, W_ca[feats]), fmodel, agg_cols)
-            S_h = stacked_scores(W_h, predict_proba(wmodel, W_h[feats]), fmodel, agg_cols)
-            cfam = COARSE[fam]
-            row = {'held_out_family': fam, 'held_out_subtype': st, 'n_held': len(S_h),
-                   'acc_on_held': float((S_h.pred == fam).mean()),
-                   'coarse_acc_on_held': float((S_h.coarse_pred == cfam).mean()),
-                   'pred_dist_on_held': json.dumps(S_h.pred.value_counts().to_dict()),
-                   'mean_conf_on_held': float(S_h.conf.mean())}
-            for alpha in (0.10, 0.20):
-                th = conformal_thresholds(S_cal, alpha)
-                sets = conformal_sets(S_h, th)
-                row[f'coverage_a{alpha}'] = float(np.mean([fam in x for x in sets]))
-                row[f'abstain_a{alpha}'] = float(np.mean([len(x) != 1 for x in sets]))
-                thc = conformal_thresholds(S_cal, alpha, 'coarse')
-                csets = conformal_sets(S_h, thc, 'coarse')
-                row[f'coarse_coverage_a{alpha}'] = float(np.mean([cfam in x for x in csets]))
-                row[f'coarse_abstain_a{alpha}'] = float(np.mean([len(x) != 1 for x in csets]))
-            loso.append(row)
+                n_ca = alloc[c][1]
+                splits.append({'held_out_subtype': st, 'family': c, 'n_train': alloc[c][0], 'n_cal': n_ca,
+                               'rank_alpha0.1': int(np.ceil((n_ca + 1) * 0.9)), 'rank_alpha0.2': int(np.ceil((n_ca + 1) * 0.8)),
+                               'control_n_train': alloc_c[c][0], 'control_n_cal': alloc_c[c][1]})
+            loso.append({'held_out_family': fam, 'held_out_subtype': st, 'n_held': row_h['n'], 'acc_on_held': row_h['acc'],
+                         'control_n_flights': len(ctrl),
+                         'coarse_acc_on_held': row_h['coarse_acc'], 'pred_dist_on_held': row_h['pred_dist'], 'mean_conf_on_held': row_h['mean_conf'],
+                         'coverage_a0.1': row_h['coverage_a0.1'], 'operational_abstain_a0.1': row_h['operational_abstain_a0.1'],
+                         'coarse_coverage_a0.1': row_h['coarse_coverage_a0.1'], 'coarse_operational_abstain_a0.1': row_h['coarse_operational_abstain_a0.1'],
+                         'coverage_a0.2': row_h['coverage_a0.2'], 'coarse_coverage_a0.2': row_h['coarse_coverage_a0.2'],
+                         'control_n': row_c['n'], 'control_acc': row_c['acc'], 'control_coarse_acc': row_c['coarse_acc'],
+                         'control_mean_conf': row_c['mean_conf'], 'control_coverage_a0.1': row_c['coverage_a0.1'],
+                         'control_coarse_coverage_a0.1': row_c['coarse_coverage_a0.1']})
             S_h.assign(held_out_subtype=st).to_csv(out / f'e2_held_{st}_flight_scores.csv', index=False)
-    LOSO = pd.DataFrame(loso); LOSO.to_csv(out / 'e2_leave_one_subtype_out.csv', index=False)
-    print('\n[E2] leave-one-subtype-out (stacked, flight level, unseen subtype):\n', LOSO.round(3).to_string(index=False))
+    if loso:
+        LOSO = pd.DataFrame(loso); LOSO.to_csv(out / 'e2_leave_one_subtype_out.csv', index=False)
+        pd.DataFrame(splits).to_csv(out / 'e2_splits.csv', index=False)
+        print('\n[E2] leave-one-subtype-out (stacked, flight level, unseen subtype) with matched-size seen-subtype control:\n',
+          LOSO[['held_out_family', 'held_out_subtype', 'n_held', 'acc_on_held', 'coarse_acc_on_held', 'mean_conf_on_held', 'coverage_a0.1',
+                'operational_abstain_a0.1', 'coarse_coverage_a0.1', 'control_acc', 'control_coarse_acc', 'control_mean_conf', 'control_coverage_a0.1']].round(3).to_string(index=False))
 
     # ---------------- E3 Whelan case studies (stacked pipeline)
-    if len(Ww):
-        tr, ca, te = split_flights(F, np.random.RandomState(0), n_train=40, n_cal=20)
+    if len(Ww) and 'e3' in RUN:
+        tr, ca, te, ex = split_flights(F, np.random.RandomState(0), n_train=40, n_cal=20)
         W_tr, W_ca = sub(Ws, tr), sub(Ws, ca)
         wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 0)
         P_ca = predict_proba(wmodel, W_ca[feats])
@@ -453,6 +565,35 @@ def main():
         Sw['set_a0.20'] = [','.join(x) for x in conformal_sets(Sw, th20)]
         Sw['coarse_set_a0.10'] = [','.join(x) for x in conformal_sets(Sw, thc10, 'coarse')]
         Sw.to_csv(out / 'e3_whelan_flight_verdicts.csv', index=False)
+        # receiver-derived disturbance intervals and a declared alert rule (case-study descriptives)
+        ev = []
+        for fid, d in Ww.groupby('flight_id', sort=False):
+            d = d.sort_values('t_start'); idx = d.index.to_numpy()
+            rx_dist = ((d['rx_fix_mean'] < 3) | (d['rx_sats_mean'] < 8)).to_numpy()
+            p_non = 1.0 - Pw_t[idx, 0]
+            alert = np.zeros(len(d), bool)
+            for i in range(1, len(d)):
+                if p_non[i] > 0.5 and p_non[i - 1] > 0.5:
+                    alert[i - 1] = alert[i] = True
+            t = d['t_start'].to_numpy()
+            def intervals(mask):
+                out_, start_ = [], None
+                for i, v in enumerate(mask):
+                    if v and start_ is None: start_ = t[i]
+                    if (not v or i == len(mask) - 1) and start_ is not None:
+                        out_.append((float(start_), float(t[i] + (5.0 if v else 0.0)))); start_ = None
+                return out_
+            dist_iv, alert_iv = intervals(rx_dist), intervals(alert)
+            delay = None
+            if dist_iv and alert_iv:
+                first = dist_iv[0][0]; later = [a for a in alert_iv if a[1] >= first]
+                delay = round(max(0.0, later[0][0] - first), 1) if later else None
+            false_alerts = sum(1 for a in alert_iv if not any(a[0] < e and a[1] > s_ for s_, e in dist_iv))
+            ev.append({'flight_id': fid, 'receiver_disturbance_intervals_s': json.dumps(dist_iv), 'alert_intervals_s': json.dumps(alert_iv),
+                       'detection_delay_s': delay, 'alerts_outside_disturbance': false_alerts, 'n_windows': len(d)})
+        pd.DataFrame(ev).to_csv(out / 'e3_whelan_events.csv', index=False)
+        print('\n[E3] Whelan receiver-derived disturbance intervals, alert rule (P(non-nominal) > 0.5 for 2 consecutive windows):\n',
+              pd.DataFrame(ev).to_string(index=False))
         print('\n[E3] Whelan window predicted-class fractions per flight:\n',
               Ww_out.groupby('flight_id')['pred'].value_counts(normalize=True).round(2).to_string())
         print('\n[E3] Whelan flight verdicts (stacked) with conformal sets:\n',

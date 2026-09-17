@@ -1,0 +1,6 @@
+Aggregation,Fine ECE (10 bins),Fine NLL,Fine Brier,Coarse ECE (10 bins),Coarse NLL,Coarse Brier
+Percentile rule,0.088 ± 0.029,1.054 ± 0.082,0.544 ± 0.040,0.089 ± 0.029,0.710 ± 0.062,0.424 ± 0.034
+"Stacked, probability summaries only",0.116 ± 0.028,0.356 ± 0.112,0.178 ± 0.063,0.098 ± 0.034,0.286 ± 0.082,0.148 ± 0.048
+"Stacked, raw flight features only",0.150 ± 0.024,0.420 ± 0.018,0.235 ± 0.012,0.141 ± 0.012,0.350 ± 0.009,0.202 ± 0.007
+"Stacked, full",0.080 ± 0.012,0.288 ± 0.089,0.144 ± 0.050,0.074 ± 0.008,0.243 ± 0.073,0.123 ± 0.039
+"Stacked, full, without derived-topic gap features",0.089 ± 0.024,0.302 ± 0.092,0.147 ± 0.052,0.082 ± 0.021,0.259 ± 0.079,0.126 ± 0.042

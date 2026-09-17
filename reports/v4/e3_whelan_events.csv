@@ -1,0 +1,4 @@
+flight_id,receiver_disturbance_intervals_s,alert_intervals_s,detection_delay_s,alerts_outside_disturbance,n_windows
+whelan_ace-benign-log_0_2033-8-19-16-27-30,[],"[[10.0, 20.0], [30.0, 35.0], [37.5, 50.0], [62.5, 82.5], [87.5, 100.0], [130.0, 135.0], [157.5, 165.0], [167.5, 185.0], [202.5, 207.5], [232.5, 245.0]]",,10,97
+whelan_ace-jamming-log_1_2033-8-19-16-46-46,"[[170.0, 177.5]]","[[75.0, 82.5], [167.5, 220.0]]",0.0,1,87
+whelan_ace-spoofing-hackrf-log_5_2033-8-19-17-14-18,"[[117.5, 120.0]]","[[45.0, 50.0], [115.0, 135.0]]",0.0,1,53
