@@ -283,6 +283,28 @@ class NoveltyGate:
         return {k: (sc[k] > self.th[k]) for k in sc}
 
 
+def episode_starts_rule(p_non, t):
+    alert = np.zeros(len(t), bool)
+    for i in range(1, len(t)):
+        if p_non[i] > 0.5 and p_non[i - 1] > 0.5:
+            alert[i - 1] = alert[i] = True
+    return [t[i] for i in range(len(t)) if alert[i] and (i == 0 or not alert[i - 1])]
+
+def episode_starts_cusum(p_non, t, k=0.5, h=0.75):
+    # one-sided CUSUM on the non-nominal probability: S_t = max(0, S_{t-1} + p_t - k); alarm while S_t > h; the
+    # episode start is the first window of the excursion that led to the alarm
+    S, alarm, starts, exc_start = 0.0, False, [], None
+    for i in range(len(t)):
+        S = max(0.0, S + p_non[i] - k)
+        if S > 0 and exc_start is None:
+            exc_start = i
+        if S == 0:
+            exc_start, alarm = None, False
+        if S > h and not alarm:
+            alarm = True; starts.append(t[exc_start if exc_start is not None else i])
+    return starts
+
+
 def stacked_scores(W, P, fmodel, agg_cols):
     A = flight_aggregates(W, P)
     S = A[['flight_id', 'family', 'subtype']].copy()
@@ -385,8 +407,11 @@ def main():
     ap.add_argument('--reps', type=int, default=5)
     ap.add_argument('--only', default='all', help='comma-separated subset of e0,e1,e2,e3 to run (others are skipped; existing files kept)')
     ap.add_argument('--e2_reps', type=int, default=3, help='seeds for the unseen-subtype experiment')
+    ap.add_argument('--real_features', default=None, help='features folder for real PX4 logs without ground truth (E6)')
     args = ap.parse_args()
     RUN = set(['e0', 'e1', 'e2', 'e3', 'e5']) if args.only == 'all' else set(args.only.split(','))
+    if args.real_features and args.only == 'all':
+        RUN.add('e6')
     fdir, out = pathlib.Path(args.features), pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -552,6 +577,14 @@ def main():
                 A_seen = flight_aggregates(sub(Ws, seen_test), predict_proba(wmodel, sub(Ws, seen_test)[feats]))
                 A_held = flight_aggregates(sub(Ws, held), predict_proba(wmodel, sub(Ws, held)[feats]))
                 gate = NoveltyGate(q=0.05, seed=700 + seed).fit(A_tr, agg_cols).calibrate(A_ca)
+                # declared rule baseline for the gate: withhold when any availability or gap aggregate exceeds its
+                # 95th percentile on the calibration flights; the rule score is the largest ratio to that percentile
+                gap_cols = [c for c in agg_cols if c.endswith('_frac_max')]
+                gap_q95 = {c: float(np.nanquantile(A_ca[c].to_numpy(dtype=float), 0.95)) for c in gap_cols}
+                def gap_rule_score(A_):
+                    X = A_[gap_cols].to_numpy(dtype=float); X = np.where(np.isnan(X), 0.0, X)
+                    q = np.array([gap_q95[c] for c in gap_cols]) + 1e-6
+                    return (X / q).max(axis=1)
                 S_cal = stacked_scores(W_ca, predict_proba(wmodel, W_ca[feats]), fmodel, agg_cols)
                 S_seen = stacked_scores(sub(Ws, seen_test), predict_proba(wmodel, sub(Ws, seen_test)[feats]), fmodel, agg_cols)
                 S_held = stacked_scores(sub(Ws, held), predict_proba(wmodel, sub(Ws, held)[feats]), fmodel, agg_cols)
@@ -565,21 +598,28 @@ def main():
                         r_[f'gate_{k}_withheld'] = float(fl[k].mean())
                         r_[f'gate_{k}_or_conformal_withheld'] = float((fl[k] | conf_abst).mean())
                     S_['gate_mahal'] = fl['mahal']; S_['gate_iso'] = fl['iso']
+                    rule_fl = gap_rule_score(A_) > 1.0
+                    r_['gate_gaprule_withheld'] = float(rule_fl.mean())
+                    r_['gate_gaprule_or_conformal_withheld'] = float((rule_fl | conf_abst).mean())
+                    S_['gate_gaprule'] = rule_fl
                 # threshold-free separability of each novelty score (and of plain confidence) between the withheld subtype and
                 # the seen-subtype test set: AUROC per seed, and the catch rate at a fixed 5% false-abstention budget on seen flights
                 from sklearn.metrics import roc_auc_score
                 sc_seen, sc_un = gate.scores(A_seen), gate.scores(A_held)
                 sc_seen['one_minus_conf'] = 1.0 - S_seen['conf'].to_numpy(); sc_un['one_minus_conf'] = 1.0 - S_held['conf'].to_numpy()
-                for k in ('mahal', 'iso', 'one_minus_conf'):
+                sc_seen['gaprule'] = gap_rule_score(A_seen); sc_un['gaprule'] = gap_rule_score(A_held)
+                for k in ('mahal', 'iso', 'one_minus_conf', 'gaprule'):
                     y = np.r_[np.ones(len(sc_un[k])), np.zeros(len(sc_seen[k]))]; x = np.r_[sc_un[k], sc_seen[k]]
                     r_held[f'gate_{k}_auroc'] = float(roc_auc_score(y, x)) if len(sc_un[k]) and len(sc_seen[k]) else np.nan
                     cut = float(np.quantile(sc_seen[k], 0.95)) if len(sc_seen[k]) else np.nan
                     r_held[f'gate_{k}_catch_at_5pct_fpr'] = float(np.mean(sc_un[k] > cut)) if len(sc_un[k]) else np.nan
                 gate_rows = []
-                for set_name, S_, sc in (('seen_test', S_seen, sc_seen), ('unseen', S_held, sc_un), ('calibration', S_cal, {**gate.scores(A_ca), 'one_minus_conf': 1.0 - S_cal['conf'].to_numpy()})):
+                for set_name, S_, sc in (('seen_test', S_seen, sc_seen), ('unseen', S_held, sc_un),
+                                         ('calibration', S_cal, {**gate.scores(A_ca), 'one_minus_conf': 1.0 - S_cal['conf'].to_numpy(), 'gaprule': gap_rule_score(A_ca)})):
                     for i, fid in enumerate(S_['flight_id']):
                         gate_rows.append({'held_out_subtype': st, 'seed': seed, 'set': set_name, 'flight_id': fid, 'family': S_['family'].iloc[i],
-                                          'mahal': float(sc['mahal'][i]), 'iso': float(sc['iso'][i]), 'one_minus_conf': float(sc['one_minus_conf'][i])})
+                                          'mahal': float(sc['mahal'][i]), 'iso': float(sc['iso'][i]), 'one_minus_conf': float(sc['one_minus_conf'][i]),
+                                          'gaprule': float(sc['gaprule'][i])})
                 gate_scores_all.extend(gate_rows)
                 per_seed.append({'held_out_family': fam, 'held_out_subtype': st, 'seed': seed,
                                  **{f'unseen_{k}': v for k, v in r_held.items()}, **{f'seen_{k}': v for k, v in r_seen.items()}})
@@ -607,9 +647,11 @@ def main():
                 'seen_coarse_acc_mean', 'unseen_mean_conf_mean', 'seen_mean_conf_mean', 'unseen_coverage_a0.1_mean', 'seen_coverage_a0.1_mean',
                 'unseen_coarse_coverage_a0.1_mean', 'seen_coarse_coverage_a0.1_mean', 'unseen_operational_abstain_a0.1_mean']
         gate_show = ['held_out_subtype', 'unseen_gate_mahal_withheld_mean', 'seen_gate_mahal_withheld_mean', 'unseen_gate_iso_withheld_mean', 'seen_gate_iso_withheld_mean',
+                     'unseen_gate_gaprule_withheld_mean', 'seen_gate_gaprule_withheld_mean',
                      'unseen_gate_mahal_or_conformal_withheld_mean', 'seen_gate_mahal_or_conformal_withheld_mean', 'unseen_operational_abstain_a0.1_mean', 'seen_operational_abstain_a0.1_mean']
         sep_show = ['held_out_subtype', 'unseen_gate_mahal_auroc_mean', 'unseen_gate_mahal_auroc_std', 'unseen_gate_mahal_catch_at_5pct_fpr_mean', 'unseen_gate_iso_auroc_mean',
-                    'unseen_gate_iso_catch_at_5pct_fpr_mean', 'unseen_gate_one_minus_conf_auroc_mean', 'unseen_gate_one_minus_conf_catch_at_5pct_fpr_mean']
+                    'unseen_gate_iso_catch_at_5pct_fpr_mean', 'unseen_gate_one_minus_conf_auroc_mean', 'unseen_gate_one_minus_conf_catch_at_5pct_fpr_mean',
+                    'unseen_gate_gaprule_auroc_mean', 'unseen_gate_gaprule_catch_at_5pct_fpr_mean']
         print(f'\n[E2] leave-one-subtype-out, one fitted pipeline per hold-out evaluated on the withheld subtype and on a disjoint seen-subtype test set, mean over {len(E2_SEEDS)} seeds:\n',
               LOSO[show].round(3).to_string(index=False))
         print(f'\n[E4] distributional abstention gate (threshold at the 95th percentile of calibration scores), fraction withheld, mean over {len(E2_SEEDS)} seeds:\n',
@@ -629,35 +671,119 @@ def main():
             t = d['t_start'].to_numpy(); fam = d['family'].iloc[0]; st = d['subtype'].iloc[0]
             onset = float(d['onset_s'].iloc[0]) if fam != 'nominal' and pd.notna(d['onset_s'].iloc[0]) else np.nan
             restore = float(d['restore_s'].iloc[0]) if pd.notna(d['restore_s'].iloc[0]) else np.nan
-            alert = np.zeros(len(d), bool)
-            for i in range(1, len(d)):
-                if p_non[i] > 0.5 and p_non[i - 1] > 0.5:
-                    alert[i - 1] = alert[i] = True
-            starts = [t[i] for i in range(len(d)) if alert[i] and (i == 0 or not alert[i - 1])]
-            row = {'flight_id': fid, 'family': fam, 'subtype': st, 'onset_s': onset, 'restore_s': restore, 'n_alert_episodes': len(starts),
-                   'first_alert_s': starts[0] if starts else np.nan}
-            if fam == 'nominal':
-                row.update({'false_alert': bool(starts), 'est_onset_s': np.nan, 'onset_error_s': np.nan, 'early_alert': bool(starts)})
-            else:
-                after = [x for x in starts if x >= onset - 5.0]          # first episode starting at or after onset (5 s tolerance)
-                est = after[0] if after else np.nan
-                row.update({'est_onset_s': est, 'onset_error_s': (est - onset) if after else np.nan,
-                            'detected_within_60s': bool(after) and (est - onset) <= 60.0,
-                            'early_alert': any(x < onset - 5.0 for x in starts), 'false_alert': np.nan})
-            rows.append(row)
+            for method, starts in (('rule', episode_starts_rule(p_non, t)), ('cusum', episode_starts_cusum(p_non, t))):
+                row = {'flight_id': fid, 'method': method, 'family': fam, 'subtype': st, 'onset_s': onset, 'restore_s': restore,
+                       'n_alert_episodes': len(starts), 'first_alert_s': starts[0] if starts else np.nan}
+                if fam == 'nominal':
+                    row.update({'false_alert': bool(starts), 'est_onset_s': np.nan, 'onset_error_s': np.nan, 'early_alert': bool(starts)})
+                else:
+                    after = [x for x in starts if x >= onset - 5.0]          # first episode starting at or after onset (5 s tolerance)
+                    est = after[0] if after else np.nan
+                    row.update({'est_onset_s': est, 'onset_error_s': (est - onset) if after else np.nan,
+                                'detected_within_60s': bool(after) and (est - onset) <= 60.0,
+                                'early_alert': any(x < onset - 5.0 for x in starts), 'false_alert': np.nan})
+                rows.append(row)
         E5 = pd.DataFrame(rows); E5.to_csv(out / 'e5_onset_localisation.csv', index=False)
         att = E5[E5.family != 'nominal']
-        summ = att.groupby(['family', 'subtype']).apply(lambda g: pd.Series({
+        summ = att.groupby(['method', 'family', 'subtype']).apply(lambda g: pd.Series({
             'n': len(g), 'detected_within_60s': float(g['detected_within_60s'].fillna(False).mean()),
             'median_abs_error_s': float(g['onset_error_s'].abs().median()) if g['onset_error_s'].notna().any() else np.nan,
             'within_10s': float((g['onset_error_s'].abs() <= 10.0).mean()), 'median_signed_error_s': float(g['onset_error_s'].median()) if g['onset_error_s'].notna().any() else np.nan,
             'early_alert_rate': float(g['early_alert'].mean())})).reset_index()
         nom = E5[E5.family == 'nominal']
-        summ = pd.concat([summ, pd.DataFrame([{'family': 'nominal', 'subtype': 'none', 'n': len(nom), 'detected_within_60s': np.nan, 'median_abs_error_s': np.nan,
-                                                 'within_10s': np.nan, 'median_signed_error_s': np.nan, 'early_alert_rate': float(nom['false_alert'].mean())}])], ignore_index=True)
+        summ = pd.concat([summ] + [pd.DataFrame([{'method': m, 'family': 'nominal', 'subtype': 'none', 'n': int((nom.method == m).sum()), 'detected_within_60s': np.nan,
+                                                   'median_abs_error_s': np.nan, 'within_10s': np.nan, 'median_signed_error_s': np.nan,
+                                                   'early_alert_rate': float(nom.loc[nom.method == m, 'false_alert'].mean())}]) for m in ('rule', 'cusum')], ignore_index=True)
         summ.to_csv(out / 'e5_onset_summary.csv', index=False)
-        print('\n[E5] onset localisation with the declared alert rule against the logged onset (one fitted pipeline; early alert = any episode starting more than 5 s before onset; for nominal flights the last column is the false-alert rate):\n',
+        print('\n[E5] onset localisation against the logged onset (one fitted pipeline): declared rule and CUSUM baseline (k = 0.5, h = 0.75); early alert = any episode starting more than 5 s before onset; for nominal flights the last column is the false-alert rate:\n',
               summ.round(3).to_string(index=False))
+
+    # ---------------- E6 real PX4 logs (no ground truth): frozen pipeline, verdict distribution, abstention, gate
+    if 'e6' in RUN and args.real_features:
+        Wr_raw = pd.read_csv(pathlib.Path(args.real_features) / 'windows.csv')
+        Wr_raw = Wr_raw[Wr_raw.source == 'real'].reset_index(drop=True)
+        # drop duplicate uploads: flights whose window feature matrices are identical (same log under several ids)
+        sig_cols = [c for c in ('t_start', 'posvel_rms', 'gps_gap_frac', 'gps_baro_dz_rms', 'baro_raw_std', 'mag_raw_std', 'step_speed_max') if c in Wr_raw.columns]
+        import hashlib
+        def flight_signature(d):
+            arr = np.nan_to_num(np.round(d.to_numpy(dtype=float), 6), nan=-999.0)
+            return hashlib.sha1(arr.tobytes()).hexdigest()
+        sig = Wr_raw.groupby('flight_id')[sig_cols].apply(flight_signature).rename('signature').reset_index()
+        keep_ids = sig.drop_duplicates(subset=['signature'])['flight_id']
+        n_dup = int(Wr_raw.flight_id.nunique() - len(keep_ids))
+        Wr_raw = Wr_raw[Wr_raw.flight_id.isin(set(keep_ids))].reset_index(drop=True)
+        print(f'[E6] duplicate uploads removed: {n_dup} (identical window feature matrices); flights kept: {Wr_raw.flight_id.nunique()}')
+        Wr = engineer(Wr_raw)
+        for c in feats:
+            if c not in Wr.columns:
+                Wr[c] = np.nan
+        Fr = pd.read_csv(pathlib.Path(args.real_features) / 'flights.csv') if (pathlib.Path(args.real_features) / 'flights.csv').exists() else None
+        tr, ca, te, ex = split_flights(F, np.random.RandomState(0), n_train=40, n_cal=20)
+        W_tr, W_ca = sub(Ws, tr), sub(Ws, ca)
+        wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 0)
+        A_tr = flight_aggregates(W_tr, stacked_pipeline.last_oof)
+        P_ca = predict_proba(wmodel, W_ca[feats]); A_ca = flight_aggregates(W_ca, P_ca)
+        gate = NoveltyGate(q=0.05, seed=0).fit(A_tr, agg_cols).calibrate(A_ca)
+        gap_cols = [c for c in agg_cols if c.endswith('_frac_max')]
+        gap_q95 = {c: float(np.nanquantile(A_ca[c].to_numpy(dtype=float), 0.95)) for c in gap_cols}
+        S_cal = stacked_scores(W_ca, P_ca, fmodel, agg_cols)
+        th10, thc10 = conformal_thresholds(S_cal, 0.10), conformal_thresholds(S_cal, 0.10, 'coarse')
+        Pr = predict_proba(wmodel, Wr[feats]); Pr_t = apply_temperature(Pr, T)
+        A_r = flight_aggregates(Wr, Pr)
+        S_r = stacked_scores(Wr, Pr, fmodel, agg_cols)
+        sets_f, sets_c = conformal_sets(S_r, th10), conformal_sets(S_r, thc10, 'coarse')
+        S_r['set_a0.10'] = [','.join(x) for x in sets_f]; S_r['coarse_set_a0.10'] = [','.join(x) for x in sets_c]
+        S_r['abstain_fine'] = [(len(x) != 1) or (p not in x) for p, x in zip(S_r.pred, sets_f)]
+        S_r['abstain_coarse'] = [(len(x) != 1) or (p not in x) for p, x in zip(S_r.coarse_pred, sets_c)]
+        fl = gate.flags(A_r); S_r['gate_mahal'] = fl['mahal']; S_r['gate_iso'] = fl['iso']
+        sc = gate.scores(A_r); S_r['mahal_score'] = sc['mahal']; S_r['iso_score'] = sc['iso']
+        Xg = A_r[gap_cols].to_numpy(dtype=float); Xg = np.where(np.isnan(Xg), 0.0, Xg)
+        S_r['gate_gaprule'] = (Xg / (np.array([gap_q95[c] for c in gap_cols]) + 1e-6)).max(axis=1) > 1.0
+        # window-level alert episodes (declared rule) and predicted-class fractions per flight
+        ep, fr = {}, {}
+        for fid, idx in Wr.groupby('flight_id', sort=False).indices.items():
+            order = np.argsort(Wr.iloc[idx]['t_start'].to_numpy()); p_non = 1.0 - Pr_t[idx][order, 0]
+            t = Wr.iloc[idx]['t_start'].to_numpy()[order]
+            alert = np.zeros(len(t), bool)
+            for i in range(1, len(t)):
+                if p_non[i] > 0.5 and p_non[i - 1] > 0.5:
+                    alert[i - 1] = alert[i] = True
+            ep[fid] = int(sum(1 for i in range(len(t)) if alert[i] and (i == 0 or not alert[i - 1])))
+            fr[fid] = {c: float((Pr_t[idx].argmax(1) == j).mean()) for j, c in enumerate(CLASSES)}
+        S_r['alert_episodes'] = S_r['flight_id'].map(ep)
+        for c in CLASSES:
+            S_r[f'window_frac_{c}'] = S_r['flight_id'].map(lambda f: fr[f][c])
+        if Fr is not None and 'flight_id' in Fr.columns:
+            keep = [c for c in ('duration_s', 'n_windows', 'ver_sw', 'ver_sw_release', 'ver_hw') if c in Fr.columns]
+            S_r = S_r.merge(Fr[['flight_id'] + keep], on='flight_id', how='left')
+            if 'ver_sw_release' in S_r.columns:
+                def decode_release(v):
+                    try:
+                        v = int(float(v))
+                    except (TypeError, ValueError):
+                        return 'unknown'
+                    major, minor = (v >> 24) & 0xFF, (v >> 16) & 0xFF
+                    return f'v{major}.{minor}' if major > 0 else 'unknown'
+                S_r['px4_version'] = S_r['ver_sw_release'].map(decode_release)
+        S_r.to_csv(out / 'e6_real_flight_verdicts.csv', index=False)
+        summ = {'n_flights': int(len(S_r)), 'n_windows': int(len(Wr)), 'duplicates_removed': n_dup,
+                **{f'verdict_frac_{c}': float((S_r.pred == c).mean()) for c in CLASSES},
+                **{f'coarse_verdict_frac_{c}': float((S_r.coarse_pred == c).mean()) for c in COARSE_CLASSES},
+                'abstain_fine_rate': float(S_r.abstain_fine.mean()), 'abstain_coarse_rate': float(S_r.abstain_coarse.mean()),
+                'gate_mahal_withheld': float(S_r.gate_mahal.mean()), 'gate_iso_withheld': float(S_r.gate_iso.mean()),
+                'gate_gaprule_withheld': float(S_r.gate_gaprule.mean()),
+                'mean_conf': float(S_r.conf.mean()), 'median_conf': float(S_r.conf.median()),
+                'frac_with_alert_episode': float((S_r.alert_episodes > 0).mean()), 'mean_alert_episodes': float(S_r.alert_episodes.mean()),
+                'nominal_and_not_withheld_frac': float(((S_r.pred == 'nominal') & ~S_r.abstain_fine & ~S_r.gate_mahal).mean())}
+        pd.DataFrame([summ]).to_csv(out / 'e6_real_summary.csv', index=False)
+        print('\n[E6] real PX4 logs (no ground truth), frozen pipeline trained on simulation only:')
+        for k, v in summ.items():
+            print(f'  {k:32s} {v:.3f}' if isinstance(v, float) else f'  {k:32s} {v}')
+        if 'px4_version' in S_r.columns:
+            by = S_r.groupby('px4_version').agg(n=('flight_id', 'size'), nominal=('pred', lambda x: float((x == 'nominal').mean())),
+                                                abstain=('abstain_fine', 'mean'), gate=('gate_mahal', 'mean'), conf=('conf', 'mean')).round(3)
+            by.index.name = 'px4_version'
+            by.to_csv(out / 'e6_real_by_version.csv'); print('\n[E6] by PX4 release (major.minor):\n', by.to_string())
 
     # ---------------- E3 Whelan case studies (stacked pipeline)
     if len(Ww) and 'e3' in RUN:
@@ -698,15 +824,22 @@ def main():
                         out_.append((float(start_), float(t[i] + (5.0 if v else 0.0)))); start_ = None
                 return out_
             dist_iv, alert_iv = intervals(rx_dist), intervals(alert)
-            delay = None
-            if dist_iv and alert_iv:
-                first = dist_iv[0][0]; later = [a for a in alert_iv if a[1] >= first]
-                delay = round(max(0.0, later[0][0] - first), 1) if later else None
-            false_alerts = sum(1 for a in alert_iv if not any(a[0] < e and a[1] > s_ for s_, e in dist_iv))
+            def delay_and_false(alert_iv_):
+                delay_ = None
+                if dist_iv and alert_iv_:
+                    first = dist_iv[0][0]; later = [a for a in alert_iv_ if a[1] >= first]
+                    delay_ = round(max(0.0, later[0][0] - first), 1) if later else None
+                return delay_, sum(1 for a in alert_iv_ if not any(a[0] < e and a[1] > s_ for s_, e in dist_iv))
+            delay, false_alerts = delay_and_false(alert_iv)
+            cusum_starts = episode_starts_cusum(p_non, t)
+            cusum_iv = [(float(x), float(x) + 5.0) for x in cusum_starts]
+            cdelay, cfalse = delay_and_false(cusum_iv)
             ev.append({'flight_id': fid, 'receiver_disturbance_intervals_s': json.dumps(dist_iv), 'alert_intervals_s': json.dumps(alert_iv),
-                       'detection_delay_s': delay, 'alerts_outside_disturbance': false_alerts, 'n_windows': len(d)})
+                       'detection_delay_s': delay, 'alerts_outside_disturbance': false_alerts,
+                       'cusum_episode_starts_s': json.dumps([float(x) for x in cusum_starts]), 'cusum_detection_delay_s': cdelay,
+                       'cusum_alerts_outside_disturbance': cfalse, 'n_windows': len(d)})
         pd.DataFrame(ev).to_csv(out / 'e3_whelan_events.csv', index=False)
-        print('\n[E3] Whelan receiver-derived disturbance intervals, alert rule (P(non-nominal) > 0.5 for 2 consecutive windows):\n',
+        print('\n[E3] Whelan receiver-derived disturbance intervals; declared alert rule (P(non-nominal) > 0.5 for 2 consecutive windows) and CUSUM (k = 0.5, h = 0.75):\n',
               pd.DataFrame(ev).to_string(index=False))
         print('\n[E3] Whelan window predicted-class fractions per flight:\n',
               Ww_out.groupby('flight_id')['pred'].value_counts(normalize=True).round(2).to_string())

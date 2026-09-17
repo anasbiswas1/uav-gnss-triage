@@ -161,18 +161,31 @@ Paired accuracy difference (random-window minus flight-grouped): 0.090 ± 0.009 
 | Frozen magnetometer | GNSS degradation | 20 | 20 | 0 | 19 | 17 | False |
 | Frozen magnetometer | Sensor fault | 9 | 9 | 11 | 9 | 8 | True |
 
+## Table 6e. Threshold-free separability of the withheld subtype from the seen-subtype test set: AUROC of each novelty score (and of one minus confidence), and the fraction of withheld flights caught at the score cut that withholds 5 percent of seen flights
+
+| Held-out subtype | Mahalanobis AUROC | Mahalanobis catch at 5% FPR | Isolation-forest AUROC | Isolation-forest catch at 5% FPR | Plain confidence AUROC | Plain confidence catch at 5% FPR | Gap-rule AUROC | Gap-rule catch at 5% FPR |
+|---|---|---|---|---|---|---|---|---|
+| Coherent drift | 0.273 ± 0.095 | 0.020 ± 0.028 | 0.157 ± 0.067 | 0.000 ± 0.000 | 0.669 ± 0.050 | 0.118 ± 0.166 | 0.511 ± 0.016 | 0.000 ± 0.000 |
+| Incoherent drift | 0.904 ± 0.031 | 0.424 ± 0.204 | 0.918 ± 0.011 | 0.712 ± 0.227 | 0.135 ± 0.022 | 0.061 ± 0.057 | 0.477 ± 0.000 | 0.000 ± 0.000 |
+| Jump | 0.529 ± 0.165 | 0.016 ± 0.022 | 0.486 ± 0.140 | 0.000 ± 0.000 | 0.819 ± 0.092 | 0.318 ± 0.324 | 0.500 ± 0.000 | 0.000 ± 0.000 |
+| No-fix reporting | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.319 ± 0.027 | 0.011 ± 0.016 | 0.657 ± 0.059 | 0.289 ± 0.057 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+| Receiver silence | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.073 ± 0.026 | 0.000 ± 0.000 | 0.939 ± 0.022 | 0.760 ± 0.147 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+| Frozen receiver output | 0.989 ± 0.011 | 0.964 ± 0.029 | 0.951 ± 0.017 | 0.881 ± 0.067 | 0.037 ± 0.043 | 0.012 ± 0.017 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| Frozen barometer | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.519 ± 0.368 | 0.218 ± 0.309 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+| Frozen magnetometer | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.002 ± 0.003 | 0.000 ± 0.000 | 0.383 ± 0.101 | 0.021 ± 0.030 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+
 ## Table 6d. Distributional abstention gate: fraction of flights withheld on the withheld subtype and on the seen-subtype test set (thresholds at the 95th percentile of the calibration flights), and the combined policy
 
-| Held-out subtype | Mahalanobis gate, unseen | Mahalanobis gate, seen | Isolation-forest gate, unseen | Isolation-forest gate, seen | Conformal policy alone, unseen | Conformal or Mahalanobis gate, unseen | Conformal or Mahalanobis gate, seen |
-|---|---|---|---|---|---|---|---|
-| Coherent drift | 0.000 ± 0.000 | 0.044 ± 0.031 | 0.000 ± 0.000 | 0.067 ± 0.054 | 0.569 ± 0.320 | 0.569 ± 0.320 | 0.178 ± 0.063 |
-| Incoherent drift | 0.364 ± 0.064 | 0.071 ± 0.058 | 0.167 ± 0.141 | 0.000 ± 0.000 | 0.182 ± 0.074 | 0.515 ± 0.113 | 0.286 ± 0.058 |
-| Jump | 0.000 ± 0.000 | 0.026 ± 0.036 | 0.000 ± 0.000 | 0.026 ± 0.036 | 0.476 ± 0.178 | 0.476 ± 0.178 | 0.256 ± 0.192 |
-| No-fix reporting | 1.000 ± 0.000 | 0.150 ± 0.041 | 0.056 ± 0.042 | 0.183 ± 0.047 | 0.233 ± 0.047 | 1.000 ± 0.000 | 0.200 ± 0.082 |
-| Receiver silence | 1.000 ± 0.000 | 0.133 ± 0.024 | 0.021 ± 0.015 | 0.233 ± 0.062 | 0.615 ± 0.115 | 1.000 ± 0.000 | 0.167 ± 0.047 |
-| Frozen receiver output | 0.941 ± 0.017 | 0.015 ± 0.021 | 0.833 ± 0.135 | 0.151 ± 0.119 | 0.012 ± 0.017 | 0.941 ± 0.017 | 0.045 ± 0.064 |
-| Frozen barometer | 0.989 ± 0.016 | 0.030 ± 0.043 | 0.000 ± 0.000 | 0.061 ± 0.086 | 0.207 ± 0.293 | 0.989 ± 0.016 | 0.121 ± 0.086 |
-| Frozen magnetometer | 0.989 ± 0.015 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.030 ± 0.043 | 0.161 ± 0.206 | 0.989 ± 0.015 | 0.151 ± 0.086 |
+| Held-out subtype | Mahalanobis gate, unseen | Mahalanobis gate, seen | Isolation-forest gate, unseen | Isolation-forest gate, seen | Gap-rule baseline, unseen | Gap-rule baseline, seen | Conformal policy alone, unseen | Conformal or Mahalanobis gate, unseen | Conformal or Mahalanobis gate, seen |
+|---|---|---|---|---|---|---|---|---|---|
+| Coherent drift | 0.000 ± 0.000 | 0.044 ± 0.031 | 0.000 ± 0.000 | 0.067 ± 0.054 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.569 ± 0.320 | 0.569 ± 0.320 | 0.178 ± 0.063 |
+| Incoherent drift | 0.364 ± 0.064 | 0.071 ± 0.058 | 0.167 ± 0.141 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.182 ± 0.074 | 0.515 ± 0.113 | 0.286 ± 0.058 |
+| Jump | 0.000 ± 0.000 | 0.026 ± 0.036 | 0.000 ± 0.000 | 0.026 ± 0.036 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.476 ± 0.178 | 0.476 ± 0.178 | 0.256 ± 0.192 |
+| No-fix reporting | 1.000 ± 0.000 | 0.150 ± 0.041 | 0.056 ± 0.042 | 0.183 ± 0.047 | 1.000 ± 0.000 | 0.000 ± 0.000 | 0.233 ± 0.047 | 1.000 ± 0.000 | 0.200 ± 0.082 |
+| Receiver silence | 1.000 ± 0.000 | 0.133 ± 0.024 | 0.021 ± 0.015 | 0.233 ± 0.062 | 1.000 ± 0.000 | 0.000 ± 0.000 | 0.615 ± 0.115 | 1.000 ± 0.000 | 0.167 ± 0.047 |
+| Frozen receiver output | 0.941 ± 0.017 | 0.015 ± 0.021 | 0.833 ± 0.135 | 0.151 ± 0.119 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.012 ± 0.017 | 0.941 ± 0.017 | 0.045 ± 0.064 |
+| Frozen barometer | 0.989 ± 0.016 | 0.030 ± 0.043 | 0.000 ± 0.000 | 0.061 ± 0.086 | 1.000 ± 0.000 | 0.000 ± 0.000 | 0.207 ± 0.293 | 0.989 ± 0.016 | 0.121 ± 0.086 |
+| Frozen magnetometer | 0.989 ± 0.015 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.030 ± 0.043 | 1.000 ± 0.000 | 0.000 ± 0.000 | 0.161 ± 0.206 | 0.989 ± 0.015 | 0.151 ± 0.086 |
 
 ## Table 7. Whelan live logs: physics-channel verdicts (detector trained on simulation only)
 
@@ -192,25 +205,71 @@ Paired accuracy difference (random-window minus flight-grouped): 0.090 ± 0.009 
 
 ## Table 7c. Live logs: receiver-derived disturbance intervals (fix type below 3 or fewer than 8 satellites) and alerts from the declared rule (P(non-nominal) above 0.5 in two consecutive windows)
 
-| Log | Receiver disturbance intervals (s) | Alert intervals (s) | Detection delay (s) | Alerts outside disturbance | Windows |
-|---|---|---|---|---|---|
-| Benign | [] | [[10.0, 20.0], [30.0, 35.0], [37.5, 50.0], [62.5, 82.5], [87.5, 100.0], [130.0, 135.0], [157.5, 165.0], [167.5, 185.0], [202.5, 207.5], [232.5, 245.0]] | nan | 10 | 97 |
-| Jamming | [[170.0, 177.5]] | [[75.0, 82.5], [167.5, 220.0]] | 0.0 | 1 | 87 |
-| Spoofing | [[117.5, 120.0]] | [[45.0, 50.0], [115.0, 135.0]] | 0.0 | 1 | 53 |
+| Log | Receiver disturbance intervals (s) | Alert intervals (s) | Detection delay (s) | Alerts outside disturbance | CUSUM episode starts (s) | CUSUM detection delay (s) | CUSUM alerts outside disturbance | Windows |
+|---|---|---|---|---|---|---|---|---|
+| Benign | [] | [[10.0, 20.0], [30.0, 35.0], [37.5, 50.0], [62.5, 82.5], [87.5, 100.0], [130.0, 135.0], [157.5, 165.0], [167.5, 185.0], [202.5, 207.5], [232.5, 245.0]] | nan | 10 | [10.0, 62.5, 157.5, 232.5] | nan | 4 | 97 |
+| Jamming | [[170.0, 177.5]] | [[75.0, 82.5], [167.5, 220.0]] | 0.0 | 1 | [167.5] | 0.0 | 0 | 87 |
+| Spoofing | [[117.5, 120.0]] | [[45.0, 50.0], [115.0, 135.0]] | 0.0 | 1 | [115.0] | 0.0 | 0 | 53 |
 
 ## Table 7d. Onset localisation on held-out flights with the declared alert rule against the logged onset (one fitted pipeline); for nominal flights the last column is the false-alert rate
 
-| Family | Subtype | Flights | Detected within 60 s | Median |onset error| (s) | Within 10 s | Median signed error (s) | Early or false alert rate |
-|---|---|---|---|---|---|---|---|
-| GNSS degradation | No-fix reporting | 17.00 | 1.00 | 3.24 | 1.00 | -3.24 | 0.06 |
-| GNSS degradation | Receiver silence | 16.00 | 0.94 | 3.46 | 0.81 | -3.02 | 0.19 |
-| GNSS degradation | Frozen receiver output | 17.00 | 1.00 | 2.83 | 1.00 | -2.83 | 0.00 |
-| Sensor fault | Frozen barometer | 7.00 | 1.00 | 0.94 | 1.00 | -0.94 | 0.00 |
-| Sensor fault | Frozen magnetometer | 13.00 | 1.00 | 2.32 | 1.00 | 0.07 | 0.00 |
-| Spoof | Coherent drift | 8.00 | 0.88 | 3.64 | 0.75 | -2.59 | 0.00 |
-| Spoof | Incoherent drift | 7.00 | 1.00 | 2.26 | 1.00 | -2.26 | 0.00 |
-| Spoof | Jump | 5.00 | 0.80 | 3.74 | 0.80 | -3.74 | 0.20 |
-| Nominal |  | 20.00 | nan | nan | nan | nan | 0.40 |
+| Method | Family | Subtype | Flights | Detected within 60 s | Median |onset error| (s) | Within 10 s | Median signed error (s) | Early or false alert rate |
+|---|---|---|---|---|---|---|---|---|
+| Declared rule | GNSS degradation | Frozen receiver output | 17.00 | 1.00 | 2.83 | 1.00 | -2.83 | 0.00 |
+| Declared rule | GNSS degradation | No-fix reporting | 17.00 | 1.00 | 3.24 | 1.00 | -3.24 | 0.06 |
+| Declared rule | GNSS degradation | Receiver silence | 16.00 | 0.94 | 3.46 | 0.81 | -3.02 | 0.19 |
+| Declared rule | Nominal |  | 20.00 | nan | nan | nan | nan | 0.40 |
+| Declared rule | Sensor fault | Frozen barometer | 7.00 | 1.00 | 0.94 | 1.00 | -0.94 | 0.00 |
+| Declared rule | Sensor fault | Frozen magnetometer | 13.00 | 1.00 | 2.32 | 1.00 | 0.07 | 0.00 |
+| Declared rule | Spoof | Coherent drift | 8.00 | 0.88 | 3.64 | 0.75 | -2.59 | 0.00 |
+| Declared rule | Spoof | Incoherent drift | 7.00 | 1.00 | 2.26 | 1.00 | -2.26 | 0.00 |
+| Declared rule | Spoof | Jump | 5.00 | 0.80 | 3.74 | 0.80 | -3.74 | 0.20 |
+| CUSUM | GNSS degradation | Frozen receiver output | 17.00 | 1.00 | 2.83 | 1.00 | -2.83 | 0.00 |
+| CUSUM | GNSS degradation | No-fix reporting | 17.00 | 0.94 | 3.21 | 0.94 | -3.21 | 0.06 |
+| CUSUM | GNSS degradation | Receiver silence | 16.00 | 0.81 | 3.40 | 0.81 | -3.40 | 0.19 |
+| CUSUM | Nominal |  | 20.00 | nan | nan | nan | nan | 0.05 |
+| CUSUM | Sensor fault | Frozen barometer | 7.00 | 1.00 | 0.94 | 1.00 | -0.94 | 0.00 |
+| CUSUM | Sensor fault | Frozen magnetometer | 13.00 | 1.00 | 2.32 | 1.00 | 0.07 | 0.00 |
+| CUSUM | Spoof | Coherent drift | 8.00 | 0.75 | 11.44 | 0.50 | 8.33 | 0.00 |
+| CUSUM | Spoof | Incoherent drift | 7.00 | 1.00 | 2.26 | 1.00 | -2.26 | 0.00 |
+| CUSUM | Spoof | Jump | 5.00 | 0.80 | 3.74 | 0.80 | -3.74 | 0.20 |
+
+## Table 10. Real PX4 flight logs without ground truth: verdict distribution, abstention and gate behaviour of the pipeline trained on simulation only
+
+| Quantity | Value |
+|---|---|
+| Flights (after removing duplicate uploads) | 66.000 |
+| Windows | 4704.000 |
+| Verdict: nominal | 0.576 |
+| Verdict: spoof | 0.030 |
+| Verdict: GNSS degradation | 0.167 |
+| Verdict: sensor fault | 0.227 |
+| Coarse verdict: nominal | 0.576 |
+| Coarse verdict: GNSS-chain inconsistency | 0.197 |
+| Coarse verdict: non-GNSS fault | 0.227 |
+| Operational abstention, fine (0.10) | 0.258 |
+| Operational abstention, coarse (0.10) | 0.258 |
+| Mahalanobis gate withheld | 0.424 |
+| Isolation-forest gate withheld | 0.152 |
+| Gap-rule baseline withheld | 0.000 |
+| Mean confidence | 0.828 |
+| Median confidence | 0.881 |
+| Flights with at least one alert episode | 0.652 |
+| Nominal verdict, not withheld by set or gate | 0.424 |
+
+## Table 10b. Real PX4 logs by firmware release
+
+| PX4 release | Flights | Nominal verdict | Operational abstention | Mahalanobis gate withheld | Mean confidence |
+|---|---|---|---|---|---|
+| unknown | 1 | 0.000 | 1.000 | 1.000 | 0.555 |
+| v1.11 | 1 | 1.000 | 0.000 | 0.000 | 0.931 |
+| v1.13 | 1 | 0.000 | 1.000 | 0.000 | 0.783 |
+| v1.14 | 5 | 0.800 | 0.200 | 0.200 | 0.884 |
+| v1.15 | 9 | 0.667 | 0.111 | 0.333 | 0.823 |
+| v1.16 | 25 | 0.560 | 0.200 | 0.480 | 0.867 |
+| v1.17 | 22 | 0.545 | 0.364 | 0.455 | 0.771 |
+| v1.18 | 1 | 0.000 | 0.000 | 1.000 | 1.000 |
+| v1.4 | 1 | 1.000 | 0.000 | 0.000 | 0.924 |
 
 ## Table 8. Window detector, top-15 feature importance (repetition 0)
 

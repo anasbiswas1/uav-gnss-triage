@@ -1,10 +1,19 @@
-Family,Subtype,Flights,Detected within 60 s,Median |onset error| (s),Within 10 s,Median signed error (s),Early or false alert rate
-GNSS degradation,No-fix reporting,17.0,1.0,3.244,1.0,-3.244,0.0588235294117647
-GNSS degradation,Receiver silence,16.0,0.9375,3.462,0.8125,-3.016,0.1875
-GNSS degradation,Frozen receiver output,17.0,1.0,2.8320000000000007,1.0,-2.8320000000000007,0.0
-Sensor fault,Frozen barometer,7.0,1.0,0.9439999999999992,1.0,-0.9439999999999992,0.0
-Sensor fault,Frozen magnetometer,13.0,1.0,2.3200000000000003,1.0,0.0720000000000027,0.0
-Spoof,Coherent drift,8.0,0.875,3.640000000000001,0.75,-2.5920000000000005,0.0
-Spoof,Incoherent drift,7.0,1.0,2.2600000000000016,1.0,-2.2600000000000016,0.0
-Spoof,Jump,5.0,0.8,3.738000000000001,0.8,-3.738000000000001,0.2
-Nominal,,20.0,,,,,0.4
+Method,Family,Subtype,Flights,Detected within 60 s,Median |onset error| (s),Within 10 s,Median signed error (s),Early or false alert rate
+Declared rule,GNSS degradation,Frozen receiver output,17.0,1.0,2.8320000000000007,1.0,-2.8320000000000007,0.0
+Declared rule,GNSS degradation,No-fix reporting,17.0,1.0,3.244,1.0,-3.244,0.0588235294117647
+Declared rule,GNSS degradation,Receiver silence,16.0,0.9375,3.462,0.8125,-3.016,0.1875
+Declared rule,Nominal,,20.0,,,,,0.4
+Declared rule,Sensor fault,Frozen barometer,7.0,1.0,0.9439999999999992,1.0,-0.9439999999999992,0.0
+Declared rule,Sensor fault,Frozen magnetometer,13.0,1.0,2.3200000000000003,1.0,0.0720000000000027,0.0
+Declared rule,Spoof,Coherent drift,8.0,0.875,3.640000000000001,0.75,-2.5920000000000005,0.0
+Declared rule,Spoof,Incoherent drift,7.0,1.0,2.2600000000000016,1.0,-2.2600000000000016,0.0
+Declared rule,Spoof,Jump,5.0,0.8,3.738000000000001,0.8,-3.738000000000001,0.2
+CUSUM,GNSS degradation,Frozen receiver output,17.0,1.0,2.8320000000000007,1.0,-2.8320000000000007,0.0
+CUSUM,GNSS degradation,No-fix reporting,17.0,0.9411764705882352,3.213999999999998,0.9411764705882352,-3.213999999999998,0.0588235294117647
+CUSUM,GNSS degradation,Receiver silence,16.0,0.8125,3.3999999999999986,0.8125,-3.3999999999999986,0.1875
+CUSUM,Nominal,,20.0,,,,,0.05
+CUSUM,Sensor fault,Frozen barometer,7.0,1.0,0.9439999999999992,1.0,-0.9439999999999992,0.0
+CUSUM,Sensor fault,Frozen magnetometer,13.0,1.0,2.3200000000000003,1.0,0.0720000000000027,0.0
+CUSUM,Spoof,Coherent drift,8.0,0.75,11.442,0.5,8.334,0.0
+CUSUM,Spoof,Incoherent drift,7.0,1.0,2.2600000000000016,1.0,-2.2600000000000016,0.0
+CUSUM,Spoof,Jump,5.0,0.8,3.738000000000001,0.8,-3.738000000000001,0.2

@@ -243,6 +243,9 @@ def main():
                             'Mahalanobis gate, seen': pm('seen_gate_mahal_withheld_mean', 'seen_gate_mahal_withheld_std'),
                             'Isolation-forest gate, unseen': pm('unseen_gate_iso_withheld_mean', 'unseen_gate_iso_withheld_std'),
                             'Isolation-forest gate, seen': pm('seen_gate_iso_withheld_mean', 'seen_gate_iso_withheld_std'),
+                            **({'Gap-rule baseline, unseen': pm('unseen_gate_gaprule_withheld_mean', 'unseen_gate_gaprule_withheld_std'),
+                                'Gap-rule baseline, seen': pm('seen_gate_gaprule_withheld_mean', 'seen_gate_gaprule_withheld_std')}
+                               if 'unseen_gate_gaprule_withheld_mean' in lo.columns else {}),
                             'Conformal policy alone, unseen': pm('unseen_operational_abstain_a0.1_mean', 'unseen_operational_abstain_a0.1_std'),
                             'Conformal or Mahalanobis gate, unseen': pm('unseen_gate_mahal_or_conformal_withheld_mean', 'unseen_gate_mahal_or_conformal_withheld_std'),
                             'Conformal or Mahalanobis gate, seen': pm('seen_gate_mahal_or_conformal_withheld_mean', 'seen_gate_mahal_or_conformal_withheld_std')})
@@ -254,7 +257,10 @@ def main():
                                 'Isolation-forest AUROC': pm('unseen_gate_iso_auroc_mean', 'unseen_gate_iso_auroc_std'),
                                 'Isolation-forest catch at 5% FPR': pm('unseen_gate_iso_catch_at_5pct_fpr_mean', 'unseen_gate_iso_catch_at_5pct_fpr_std'),
                                 'Plain confidence AUROC': pm('unseen_gate_one_minus_conf_auroc_mean', 'unseen_gate_one_minus_conf_auroc_std'),
-                                'Plain confidence catch at 5% FPR': pm('unseen_gate_one_minus_conf_catch_at_5pct_fpr_mean', 'unseen_gate_one_minus_conf_catch_at_5pct_fpr_std')})
+                                'Plain confidence catch at 5% FPR': pm('unseen_gate_one_minus_conf_catch_at_5pct_fpr_mean', 'unseen_gate_one_minus_conf_catch_at_5pct_fpr_std'),
+                                **({'Gap-rule AUROC': pm('unseen_gate_gaprule_auroc_mean', 'unseen_gate_gaprule_auroc_std'),
+                                    'Gap-rule catch at 5% FPR': pm('unseen_gate_gaprule_catch_at_5pct_fpr_mean', 'unseen_gate_gaprule_catch_at_5pct_fpr_std')}
+                                   if 'unseen_gate_gaprule_auroc_mean' in lo.columns else {})})
             t6e.to_csv(T / 't6e_gate_separability.csv', index=False)
             md.append('## Table 6e. Threshold-free separability of the withheld subtype from the seen-subtype test set: AUROC of each novelty score (and of one minus '
                       'confidence), and the fraction of withheld flights caught at the score cut that withholds 5 percent of seen flights\n\n' + md_table(t6e))
@@ -319,7 +325,9 @@ def main():
     if events is not None:
         t7c = events.reset_index().copy(); t7c['flight_id'] = t7c['flight_id'].str.extract(r'ace-(\w+?)-')[0].str.capitalize()
         t7c = t7c.rename(columns={'flight_id': 'Log', 'receiver_disturbance_intervals_s': 'Receiver disturbance intervals (s)', 'alert_intervals_s': 'Alert intervals (s)',
-                                  'detection_delay_s': 'Detection delay (s)', 'alerts_outside_disturbance': 'Alerts outside disturbance', 'n_windows': 'Windows'})
+                                  'detection_delay_s': 'Detection delay (s)', 'alerts_outside_disturbance': 'Alerts outside disturbance', 'n_windows': 'Windows',
+                                  'cusum_episode_starts_s': 'CUSUM episode starts (s)', 'cusum_detection_delay_s': 'CUSUM detection delay (s)',
+                                  'cusum_alerts_outside_disturbance': 'CUSUM alerts outside disturbance'})
         t7c.to_csv(T / 't7c_whelan_events.csv', index=False)
         md.append('## Table 7c. Live logs: receiver-derived disturbance intervals (fix type below 3 or fewer than 8 satellites) and alerts from the declared rule '
                   '(P(non-nominal) above 0.5 in two consecutive windows)\n\n' + md_table(t7c, '.1f'))
@@ -339,13 +347,19 @@ def main():
     if (R / 'e5_onset_summary.csv').exists():
         e5 = pd.read_csv(R / 'e5_onset_summary.csv')
         e5['family'] = e5['family'].map(LABEL); e5['subtype'] = e5['subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v if v != 'none' else ''))
-        t7d = e5.rename(columns={'family': 'Family', 'subtype': 'Subtype', 'n': 'Flights', 'detected_within_60s': 'Detected within 60 s',
+        if 'method' in e5.columns:
+            e5['method'] = e5['method'].map({'rule': 'Declared rule', 'cusum': 'CUSUM'})
+            e5 = e5.sort_values(['method', 'family', 'subtype'], ascending=[False, True, True])
+        t7d = e5.rename(columns={'method': 'Method', 'family': 'Family', 'subtype': 'Subtype', 'n': 'Flights', 'detected_within_60s': 'Detected within 60 s',
                                  'median_abs_error_s': 'Median |onset error| (s)', 'within_10s': 'Within 10 s', 'median_signed_error_s': 'Median signed error (s)',
                                  'early_alert_rate': 'Early or false alert rate'})
         t7d.to_csv(T / 't7d_onset_localisation.csv', index=False)
         md.append('## Table 7d. Onset localisation on held-out flights with the declared alert rule against the logged onset (one fitted pipeline); for nominal '
                   'flights the last column is the false-alert rate\n\n' + md_table(t7d, '.2f'))
-        det = pd.read_csv(R / 'e5_onset_localisation.csv'); att = det[(det.family != 'nominal') & det.onset_error_s.notna()]
+        det = pd.read_csv(R / 'e5_onset_localisation.csv')
+        if 'method' in det.columns:
+            det = det[det.method == 'rule']
+        att = det[(det.family != 'nominal') & det.onset_error_s.notna()]
         if len(att):
             fig, ax = plt.subplots(figsize=(6.4, 3.0))
             order = [st for st in SUBTYPE_LABEL if st in set(att.subtype)]
@@ -354,6 +368,32 @@ def main():
             ax.axhline(0, ls='--', lw=0.8, color='k'); ax.set_ylabel('Estimated minus logged onset (s)')
             ax.set_title('Onset localisation error on held-out flights'); plt.setp(ax.get_xticklabels(), rotation=25, ha='right', fontsize=7)
             save(fig, 'f_onset_localisation')
+
+    # ---------------------------------------------------------------- T10 real PX4 logs
+    if (R / 'e6_real_summary.csv').exists():
+        e6 = pd.read_csv(R / 'e6_real_summary.csv').iloc[0]
+        t10 = pd.DataFrame({'Quantity': ['Flights (after removing duplicate uploads)', 'Windows', 'Verdict: nominal', 'Verdict: spoof', 'Verdict: GNSS degradation', 'Verdict: sensor fault',
+                                         'Coarse verdict: nominal', 'Coarse verdict: GNSS-chain inconsistency', 'Coarse verdict: non-GNSS fault',
+                                         'Operational abstention, fine (0.10)', 'Operational abstention, coarse (0.10)', 'Mahalanobis gate withheld',
+                                         'Isolation-forest gate withheld', 'Gap-rule baseline withheld', 'Mean confidence', 'Median confidence',
+                                         'Flights with at least one alert episode', 'Nominal verdict, not withheld by set or gate'],
+                            'Value': [int(e6['n_flights']), int(e6['n_windows']), e6['verdict_frac_nominal'], e6['verdict_frac_spoof'], e6['verdict_frac_gps_degrade'],
+                                      e6['verdict_frac_sensor_fault'], e6['coarse_verdict_frac_nominal'], e6['coarse_verdict_frac_gnss_chain'], e6['coarse_verdict_frac_non_gnss_fault'],
+                                      e6['abstain_fine_rate'], e6['abstain_coarse_rate'], e6['gate_mahal_withheld'], e6['gate_iso_withheld'], e6['gate_gaprule_withheld'],
+                                      e6['mean_conf'], e6['median_conf'], e6['frac_with_alert_episode'], e6['nominal_and_not_withheld_frac']]})
+        t10.to_csv(T / 't10_real_logs.csv', index=False)
+        md.append('## Table 10. Real PX4 flight logs without ground truth: verdict distribution, abstention and gate behaviour of the pipeline trained on simulation only\n\n' + md_table(t10))
+        if (R / 'e6_real_by_version.csv').exists():
+            bv = pd.read_csv(R / 'e6_real_by_version.csv').rename(columns={'ver_sw_release': 'Firmware release', 'px4_version': 'PX4 release', 'n': 'Flights', 'nominal': 'Nominal verdict',
+                                                                          'abstain': 'Operational abstention', 'gate': 'Mahalanobis gate withheld', 'conf': 'Mean confidence'})
+            bv.to_csv(T / 't10b_real_logs_by_version.csv', index=False)
+            md.append('## Table 10b. Real PX4 logs by firmware release\n\n' + md_table(bv))
+        vr = pd.read_csv(R / 'e6_real_flight_verdicts.csv')
+        fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.8))
+        axes[0].hist(vr['conf'], bins=np.linspace(0, 1, 21)); axes[0].set_xlabel('Flight confidence'); axes[0].set_ylabel('Flights'); axes[0].set_title('Real logs: confidence')
+        counts = vr['pred'].value_counts().reindex(CLASSES).fillna(0)
+        axes[1].bar([LABEL[c] for c in CLASSES], counts.to_numpy()); axes[1].set_title('Real logs: verdicts'); plt.setp(axes[1].get_xticklabels(), rotation=20, ha='right', fontsize=7)
+        save(fig, 'f_real_logs')
 
     # ---------------------------------------------------------------- T8 feature importance, T9 flight-model coefficients
     if (R / 'e1_rep0_window_feature_importance.csv').exists():

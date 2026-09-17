@@ -17,7 +17,7 @@ Design rules (from the plan):
     failure-injection messages, SIM_GPS_USED changes for no-fix reporting); the manifest is the fallback.
 
 Usage:
-  python sih_features.py --sih <run dir> [--sih <another run dir>] --whelan_zip <UAVAttackData.zip> --out <dir>
+  python sih_features.py --sih <run dir> [--sih <another run dir>] --whelan_zip <UAVAttackData.zip> [--real_dir <folder of .ulg>] --out <dir>
 Outputs: <out>/windows.csv, <out>/flights.csv, and a printed inspection + per-label feature summary.
 """
 import argparse
@@ -133,7 +133,10 @@ def build_channels(path, inspect=False):
     u, topics = load_ulog(path)
     t0 = u.start_timestamp
     duration = (u.last_timestamp - t0) / 1e6
-    out = {'log': path.name, 'duration_s': duration}
+    info = getattr(u, 'msg_info_dict', {}) or {}
+    out = {'log': path.name, 'duration_s': duration,
+           'ver_sw': str(info.get('ver_sw', ''))[:10], 'ver_sw_release': str(info.get('ver_sw_release', '')),
+           'ver_hw': str(info.get('ver_hw', '')), 'sys_name': str(info.get('sys_name', ''))}
 
     # exact event times from the log
     ev = {'t_inject': np.nan, 't_clear': np.nan, 't_spoof': np.nan, 't_nofix': np.nan, 't_nofix_clear': np.nan}
@@ -381,6 +384,8 @@ def window_features(df):
 
 # ------------------------------------------------------------------ labels
 def window_label(fam, t_start, t_end, onset, restore):
+    if fam == 'unlabelled':
+        return 'unlabelled'
     if fam == 'nominal' or onset is None or np.isnan(onset):
         return fam
     if t_end < onset:
@@ -394,6 +399,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--sih', action='append', default=[], help='folder with manifest.jsonl and *.ulg (repeatable)')
     ap.add_argument('--whelan_zip', default=None, help='UAVAttackData.zip; the three live logs are extracted')
+    ap.add_argument('--real_dir', action='append', default=[], help='folder of real PX4 .ulg files with no ground truth (repeatable)')
     ap.add_argument('--out', required=True)
     args = ap.parse_args()
     out = pathlib.Path(args.out); out.mkdir(parents=True, exist_ok=True)
@@ -435,6 +441,13 @@ def main():
                                           'family': fam, 'subtype': 'live_' + fam, 'onset_s': np.nan, 'restore_s': np.nan,
                                           'home_lat': np.nan, 'noise_k': np.nan, 'noise_t': np.nan, 'noise_p': np.nan}))
 
+    for folder in args.real_dir:
+        folder = pathlib.Path(folder)
+        for path in sorted(folder.glob('*.ulg')):
+            jobs.append((path, {'flight_id': 'real_' + path.stem, 'source': 'real', 'run': folder.name,
+                                'family': 'unlabelled', 'subtype': 'unlabelled', 'onset_s': np.nan, 'restore_s': np.nan,
+                                'home_lat': np.nan, 'noise_k': np.nan, 'noise_t': np.nan, 'noise_p': np.nan}))
+
     rows, flights = [], []
     seen_sources = set()
     for path, meta in jobs:
@@ -465,9 +478,13 @@ def main():
         wf['window_label'] = [window_label(meta['family'], a, b, onset, restore)
                               for a, b in zip(wf['t_start'], wf['t_end'])]
         rows.append(wf)
-        flights.append({**meta, 'log': path.name, 'duration_s': round(chd['duration_s'], 1), 'n_windows': len(wf)})
+        flights.append({**meta, 'log': path.name, 'duration_s': round(chd['duration_s'], 1), 'n_windows': len(wf),
+                        'ver_sw': chd.get('ver_sw', ''), 'ver_sw_release': chd.get('ver_sw_release', ''),
+                        'ver_hw': chd.get('ver_hw', ''), 'sys_name': chd.get('sys_name', '')})
         print(f'{meta["flight_id"]:40s} {meta["family"]:13s} windows={len(wf):4d} duration={chd["duration_s"]:.0f}s')
 
+    if not rows:
+        print('no flights processed (every log was skipped or no inputs were given)'); return
     W = pd.concat(rows, ignore_index=True)
     F = pd.DataFrame(flights)
     W.attrs['feature_version'] = FEATURE_VERSION

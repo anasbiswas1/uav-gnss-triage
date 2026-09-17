@@ -1,0 +1,19 @@
+Quantity,Value
+Flights (after removing duplicate uploads),66.0
+Windows,4704.0
+Verdict: nominal,0.5757575757575758
+Verdict: spoof,0.0303030303030303
+Verdict: GNSS degradation,0.1666666666666666
+Verdict: sensor fault,0.2272727272727272
+Coarse verdict: nominal,0.5757575757575758
+Coarse verdict: GNSS-chain inconsistency,0.1969696969696969
+Coarse verdict: non-GNSS fault,0.2272727272727272
+"Operational abstention, fine (0.10)",0.2575757575757575
+"Operational abstention, coarse (0.10)",0.2575757575757575
+Mahalanobis gate withheld,0.4242424242424242
+Isolation-forest gate withheld,0.1515151515151515
+Gap-rule baseline withheld,0.0
+Mean confidence,0.8282434707861297
+Median confidence,0.8809682924922445
+Flights with at least one alert episode,0.6515151515151515
+"Nominal verdict, not withheld by set or gate",0.4242424242424242
