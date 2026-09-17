@@ -1,33 +1,33 @@
-Held-out subtype,Family,Train,Calibration,Rank (0.10),Rank (0.20),Control train,Control calibration
-drift_coherent,Nominal,20,20,19,17,20,20
-drift_coherent,Spoof,20,20,19,17,20,20
-drift_coherent,GNSS degradation,20,20,19,17,20,20
-drift_coherent,Sensor fault,20,20,19,17,20,20
-drift_incoherent,Nominal,20,20,19,17,20,20
-drift_incoherent,Spoof,19,19,18,16,20,20
-drift_incoherent,GNSS degradation,20,20,19,17,20,20
-drift_incoherent,Sensor fault,20,20,19,17,20,20
-jump,Nominal,20,20,19,17,20,20
-jump,Spoof,19,20,19,17,20,20
-jump,GNSS degradation,20,20,19,17,20,20
-jump,Sensor fault,20,20,19,17,20,20
-no_fix_then_ok,Nominal,20,20,19,17,20,20
-no_fix_then_ok,Spoof,20,20,19,17,20,20
-no_fix_then_ok,GNSS degradation,20,20,19,17,20,20
-no_fix_then_ok,Sensor fault,20,20,19,17,20,20
-off_then_ok,Nominal,20,20,19,17,20,20
-off_then_ok,Spoof,20,20,19,17,20,20
-off_then_ok,GNSS degradation,20,20,19,17,20,20
-off_then_ok,Sensor fault,20,20,19,17,20,20
-stuck_then_ok,Nominal,20,20,19,17,20,20
-stuck_then_ok,Spoof,20,20,19,17,20,20
-stuck_then_ok,GNSS degradation,20,20,19,17,20,20
-stuck_then_ok,Sensor fault,20,20,19,17,20,20
-baro_stuck,Nominal,20,20,19,17,20,20
-baro_stuck,Spoof,20,20,19,17,20,20
-baro_stuck,GNSS degradation,20,20,19,17,20,20
-baro_stuck,Sensor fault,15,16,16,14,20,20
-mag_stuck,Nominal,20,20,19,17,20,20
-mag_stuck,Spoof,20,20,19,17,20,20
-mag_stuck,GNSS degradation,20,20,19,17,20,20
-mag_stuck,Sensor fault,14,15,15,13,20,20
+Held-out subtype,Family,Train,Calibration,Seen test,Rank (0.10),Rank (0.20),Threshold at max score (0.10)
+Coherent drift,Nominal,20,20,0,19,17,False
+Coherent drift,Spoof,14,14,15,14,12,True
+Coherent drift,GNSS degradation,20,20,0,19,17,False
+Coherent drift,Sensor fault,20,20,0,19,17,False
+Incoherent drift,Nominal,20,20,0,19,17,False
+Incoherent drift,Spoof,12,12,14,12,11,True
+Incoherent drift,GNSS degradation,20,20,0,19,17,False
+Incoherent drift,Sensor fault,20,20,0,19,17,False
+Jump,Nominal,20,20,0,19,17,False
+Jump,Spoof,13,13,13,13,12,True
+Jump,GNSS degradation,20,20,0,19,17,False
+Jump,Sensor fault,20,20,0,19,17,False
+No-fix reporting,Nominal,20,20,0,19,17,False
+No-fix reporting,Spoof,20,20,0,19,17,False
+No-fix reporting,GNSS degradation,20,20,20,19,17,False
+No-fix reporting,Sensor fault,20,20,0,19,17,False
+Receiver silence,Nominal,20,20,0,19,17,False
+Receiver silence,Spoof,20,20,0,19,17,False
+Receiver silence,GNSS degradation,19,19,20,18,16,False
+Receiver silence,Sensor fault,20,20,0,19,17,False
+Frozen receiver output,Nominal,20,20,0,19,17,False
+Frozen receiver output,Spoof,20,20,0,19,17,False
+Frozen receiver output,GNSS degradation,20,20,22,19,17,False
+Frozen receiver output,Sensor fault,20,20,0,19,17,False
+Frozen barometer,Nominal,20,20,0,19,17,False
+Frozen barometer,Spoof,20,20,0,19,17,False
+Frozen barometer,GNSS degradation,20,20,0,19,17,False
+Frozen barometer,Sensor fault,10,10,11,10,9,True
+Frozen magnetometer,Nominal,20,20,0,19,17,False
+Frozen magnetometer,Spoof,20,20,0,19,17,False
+Frozen magnetometer,GNSS degradation,20,20,0,19,17,False
+Frozen magnetometer,Sensor fault,9,9,11,9,8,True

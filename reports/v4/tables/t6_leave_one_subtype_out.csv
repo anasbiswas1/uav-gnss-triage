@@ -1,9 +1,9 @@
-Held-out family,Held-out subtype,n,Fine accuracy,Coarse accuracy,Mean confidence,Fine coverage (0.10),Operational abstention (0.10),Coarse coverage (0.10),Predicted as
-Spoof,drift_coherent,17,0.4117647058823529,0.4117647058823529,0.7009999728588394,0.4705882352941176,0.0588235294117647,0.1764705882352941,"{""nominal"": 10, ""spoof"": 7}"
-Spoof,drift_incoherent,22,0.3181818181818182,1.0,0.7523420883968254,0.4090909090909091,0.2727272727272727,1.0,"{""gps_degrade"": 15, ""spoof"": 7}"
-Spoof,jump,21,0.238095238095238,0.5714285714285714,0.6510467785301027,0.238095238095238,0.2857142857142857,0.3809523809523809,"{""nominal"": 9, ""gps_degrade"": 7, ""spoof"": 5}"
-GNSS degradation,no_fix_then_ok,30,1.0,1.0,0.9188723930202468,0.8333333333333334,0.1666666666666666,1.0,"{""gps_degrade"": 30}"
-GNSS degradation,off_then_ok,32,0.0,0.0,0.9999864852666158,0.0,0.0,0.0,"{""nominal"": 32}"
-GNSS degradation,stuck_then_ok,28,0.0,0.7857142857142857,0.9732008947527404,0.0,0.0,0.7857142857142857,"{""spoof"": 22, ""sensor_fault"": 6}"
-Sensor fault,baro_stuck,29,0.0,0.0,0.8574405945496077,0.0,0.0344827586206896,0.0,"{""spoof"": 28, ""gps_degrade"": 1}"
-Sensor fault,mag_stuck,31,0.0,0.0,0.9945212599223268,0.0,0.0,0.0,"{""gps_degrade"": 31}"
+Held-out family,Held-out subtype,n unseen,n seen test,"Fine accuracy, unseen","Fine accuracy, seen","Coarse accuracy, unseen","Coarse accuracy, seen","Mean confidence, unseen","Mean confidence, seen"
+Spoof,Coherent drift,17,15,0.157 ± 0.028,0.867 ± 0.000,0.157 ± 0.028,0.933 ± 0.054,0.686 ± 0.034,0.770 ± 0.005
+Spoof,Incoherent drift,22,14,0.076 ± 0.021,0.809 ± 0.221,0.985 ± 0.021,0.809 ± 0.221,0.916 ± 0.005,0.750 ± 0.045
+Spoof,Jump,21,13,0.111 ± 0.022,0.692 ± 0.188,0.222 ± 0.098,0.718 ± 0.192,0.619 ± 0.055,0.824 ± 0.018
+GNSS degradation,No-fix reporting,30,20,0.978 ± 0.016,1.000 ± 0.000,1.000 ± 0.000,1.000 ± 0.000,0.888 ± 0.006,0.963 ± 0.009
+GNSS degradation,Receiver silence,32,20,0.917 ± 0.064,1.000 ± 0.000,0.969 ± 0.025,1.000 ± 0.000,0.722 ± 0.029,0.965 ± 0.004
+GNSS degradation,Frozen receiver output,28,22,0.000 ± 0.000,1.000 ± 0.000,0.941 ± 0.084,1.000 ± 0.000,0.991 ± 0.013,0.942 ± 0.029
+Sensor fault,Frozen barometer,29,11,0.000 ± 0.000,0.970 ± 0.043,0.000 ± 0.000,0.970 ± 0.043,0.885 ± 0.095,0.901 ± 0.078
+Sensor fault,Frozen magnetometer,31,11,0.333 ± 0.471,0.939 ± 0.043,0.333 ± 0.471,0.939 ± 0.043,0.911 ± 0.105,0.891 ± 0.081

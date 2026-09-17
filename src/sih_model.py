@@ -386,7 +386,7 @@ def main():
     ap.add_argument('--only', default='all', help='comma-separated subset of e0,e1,e2,e3 to run (others are skipped; existing files kept)')
     ap.add_argument('--e2_reps', type=int, default=3, help='seeds for the unseen-subtype experiment')
     args = ap.parse_args()
-    RUN = set(['e0', 'e1', 'e2', 'e3']) if args.only == 'all' else set(args.only.split(','))
+    RUN = set(['e0', 'e1', 'e2', 'e3', 'e5']) if args.only == 'all' else set(args.only.split(','))
     fdir, out = pathlib.Path(args.features), pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -529,7 +529,7 @@ def main():
             row[f'coarse_operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S.coarse_pred, csets)]))
         return row
 
-    per_seed, splits = [], []
+    per_seed, splits, gate_scores_all = [], [], []
     E2_SEEDS = list(range(args.e2_reps))
     for fam in (CLASSES[1:] if 'e2' in RUN else []):
         for st in sorted(F.loc[F.family == fam, 'subtype'].unique()):
@@ -565,6 +565,22 @@ def main():
                         r_[f'gate_{k}_withheld'] = float(fl[k].mean())
                         r_[f'gate_{k}_or_conformal_withheld'] = float((fl[k] | conf_abst).mean())
                     S_['gate_mahal'] = fl['mahal']; S_['gate_iso'] = fl['iso']
+                # threshold-free separability of each novelty score (and of plain confidence) between the withheld subtype and
+                # the seen-subtype test set: AUROC per seed, and the catch rate at a fixed 5% false-abstention budget on seen flights
+                from sklearn.metrics import roc_auc_score
+                sc_seen, sc_un = gate.scores(A_seen), gate.scores(A_held)
+                sc_seen['one_minus_conf'] = 1.0 - S_seen['conf'].to_numpy(); sc_un['one_minus_conf'] = 1.0 - S_held['conf'].to_numpy()
+                for k in ('mahal', 'iso', 'one_minus_conf'):
+                    y = np.r_[np.ones(len(sc_un[k])), np.zeros(len(sc_seen[k]))]; x = np.r_[sc_un[k], sc_seen[k]]
+                    r_held[f'gate_{k}_auroc'] = float(roc_auc_score(y, x)) if len(sc_un[k]) and len(sc_seen[k]) else np.nan
+                    cut = float(np.quantile(sc_seen[k], 0.95)) if len(sc_seen[k]) else np.nan
+                    r_held[f'gate_{k}_catch_at_5pct_fpr'] = float(np.mean(sc_un[k] > cut)) if len(sc_un[k]) else np.nan
+                gate_rows = []
+                for set_name, S_, sc in (('seen_test', S_seen, sc_seen), ('unseen', S_held, sc_un), ('calibration', S_cal, {**gate.scores(A_ca), 'one_minus_conf': 1.0 - S_cal['conf'].to_numpy()})):
+                    for i, fid in enumerate(S_['flight_id']):
+                        gate_rows.append({'held_out_subtype': st, 'seed': seed, 'set': set_name, 'flight_id': fid, 'family': S_['family'].iloc[i],
+                                          'mahal': float(sc['mahal'][i]), 'iso': float(sc['iso'][i]), 'one_minus_conf': float(sc['one_minus_conf'][i])})
+                gate_scores_all.extend(gate_rows)
                 per_seed.append({'held_out_family': fam, 'held_out_subtype': st, 'seed': seed,
                                  **{f'unseen_{k}': v for k, v in r_held.items()}, **{f'seen_{k}': v for k, v in r_seen.items()}})
                 for c in CLASSES:
@@ -586,15 +602,62 @@ def main():
         LOSO['unseen_pred_dist_seed0'] = g['unseen_pred_dist'].first().to_numpy()
         LOSO.to_csv(out / 'e2_leave_one_subtype_out.csv', index=False)
         pd.DataFrame(splits).to_csv(out / 'e2_splits.csv', index=False)
+        pd.DataFrame(gate_scores_all).to_csv(out / 'e2_gate_scores.csv', index=False)
         show = ['held_out_family', 'held_out_subtype', 'unseen_n_mean', 'seen_n_mean', 'unseen_acc_mean', 'seen_acc_mean', 'unseen_coarse_acc_mean',
                 'seen_coarse_acc_mean', 'unseen_mean_conf_mean', 'seen_mean_conf_mean', 'unseen_coverage_a0.1_mean', 'seen_coverage_a0.1_mean',
                 'unseen_coarse_coverage_a0.1_mean', 'seen_coarse_coverage_a0.1_mean', 'unseen_operational_abstain_a0.1_mean']
         gate_show = ['held_out_subtype', 'unseen_gate_mahal_withheld_mean', 'seen_gate_mahal_withheld_mean', 'unseen_gate_iso_withheld_mean', 'seen_gate_iso_withheld_mean',
                      'unseen_gate_mahal_or_conformal_withheld_mean', 'seen_gate_mahal_or_conformal_withheld_mean', 'unseen_operational_abstain_a0.1_mean', 'seen_operational_abstain_a0.1_mean']
+        sep_show = ['held_out_subtype', 'unseen_gate_mahal_auroc_mean', 'unseen_gate_mahal_auroc_std', 'unseen_gate_mahal_catch_at_5pct_fpr_mean', 'unseen_gate_iso_auroc_mean',
+                    'unseen_gate_iso_catch_at_5pct_fpr_mean', 'unseen_gate_one_minus_conf_auroc_mean', 'unseen_gate_one_minus_conf_catch_at_5pct_fpr_mean']
         print(f'\n[E2] leave-one-subtype-out, one fitted pipeline per hold-out evaluated on the withheld subtype and on a disjoint seen-subtype test set, mean over {len(E2_SEEDS)} seeds:\n',
               LOSO[show].round(3).to_string(index=False))
         print(f'\n[E4] distributional abstention gate (threshold at the 95th percentile of calibration scores), fraction withheld, mean over {len(E2_SEEDS)} seeds:\n',
               LOSO[gate_show].round(3).to_string(index=False))
+        print(f'\n[E4] threshold-free separability, withheld subtype against seen-subtype test set (AUROC per seed then averaged; catch rate at the score cut that withholds 5% of seen flights):\n',
+              LOSO[sep_show].round(3).to_string(index=False))
+
+    # ---------------- E5 onset localisation against the logged onset (one fitted pipeline, held-out test flights)
+    if 'e5' in RUN:
+        tr, ca, te, ex = split_flights(F, np.random.RandomState(900), n_train=20, n_cal=20, n_test=10 ** 6)
+        W_tr, W_te = sub(Ws, tr), sub(Ws, te | ex)
+        wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 900)
+        P_te = apply_temperature(predict_proba(wmodel, W_te[feats]), T)
+        rows = []
+        for fid, idx in W_te.groupby('flight_id', sort=False).indices.items():
+            d = W_te.iloc[idx].sort_values('t_start'); p_non = 1.0 - P_te[idx][np.argsort(W_te.iloc[idx]['t_start'].to_numpy()), 0]
+            t = d['t_start'].to_numpy(); fam = d['family'].iloc[0]; st = d['subtype'].iloc[0]
+            onset = float(d['onset_s'].iloc[0]) if fam != 'nominal' and pd.notna(d['onset_s'].iloc[0]) else np.nan
+            restore = float(d['restore_s'].iloc[0]) if pd.notna(d['restore_s'].iloc[0]) else np.nan
+            alert = np.zeros(len(d), bool)
+            for i in range(1, len(d)):
+                if p_non[i] > 0.5 and p_non[i - 1] > 0.5:
+                    alert[i - 1] = alert[i] = True
+            starts = [t[i] for i in range(len(d)) if alert[i] and (i == 0 or not alert[i - 1])]
+            row = {'flight_id': fid, 'family': fam, 'subtype': st, 'onset_s': onset, 'restore_s': restore, 'n_alert_episodes': len(starts),
+                   'first_alert_s': starts[0] if starts else np.nan}
+            if fam == 'nominal':
+                row.update({'false_alert': bool(starts), 'est_onset_s': np.nan, 'onset_error_s': np.nan, 'early_alert': bool(starts)})
+            else:
+                after = [x for x in starts if x >= onset - 5.0]          # first episode starting at or after onset (5 s tolerance)
+                est = after[0] if after else np.nan
+                row.update({'est_onset_s': est, 'onset_error_s': (est - onset) if after else np.nan,
+                            'detected_within_60s': bool(after) and (est - onset) <= 60.0,
+                            'early_alert': any(x < onset - 5.0 for x in starts), 'false_alert': np.nan})
+            rows.append(row)
+        E5 = pd.DataFrame(rows); E5.to_csv(out / 'e5_onset_localisation.csv', index=False)
+        att = E5[E5.family != 'nominal']
+        summ = att.groupby(['family', 'subtype']).apply(lambda g: pd.Series({
+            'n': len(g), 'detected_within_60s': float(g['detected_within_60s'].fillna(False).mean()),
+            'median_abs_error_s': float(g['onset_error_s'].abs().median()) if g['onset_error_s'].notna().any() else np.nan,
+            'within_10s': float((g['onset_error_s'].abs() <= 10.0).mean()), 'median_signed_error_s': float(g['onset_error_s'].median()) if g['onset_error_s'].notna().any() else np.nan,
+            'early_alert_rate': float(g['early_alert'].mean())})).reset_index()
+        nom = E5[E5.family == 'nominal']
+        summ = pd.concat([summ, pd.DataFrame([{'family': 'nominal', 'subtype': 'none', 'n': len(nom), 'detected_within_60s': np.nan, 'median_abs_error_s': np.nan,
+                                                 'within_10s': np.nan, 'median_signed_error_s': np.nan, 'early_alert_rate': float(nom['false_alert'].mean())}])], ignore_index=True)
+        summ.to_csv(out / 'e5_onset_summary.csv', index=False)
+        print('\n[E5] onset localisation with the declared alert rule against the logged onset (one fitted pipeline; early alert = any episode starting more than 5 s before onset; for nominal flights the last column is the false-alert rate):\n',
+              summ.round(3).to_string(index=False))
 
     # ---------------- E3 Whelan case studies (stacked pipeline)
     if len(Ww) and 'e3' in RUN:

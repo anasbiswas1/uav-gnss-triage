@@ -247,6 +247,17 @@ def main():
                             'Conformal or Mahalanobis gate, unseen': pm('unseen_gate_mahal_or_conformal_withheld_mean', 'unseen_gate_mahal_or_conformal_withheld_std'),
                             'Conformal or Mahalanobis gate, seen': pm('seen_gate_mahal_or_conformal_withheld_mean', 'seen_gate_mahal_or_conformal_withheld_std')})
         t6d.to_csv(T / 't6d_distributional_gate.csv', index=False)
+        if 'unseen_gate_mahal_auroc_mean' in lo.columns:
+            t6e = pd.DataFrame({'Held-out subtype': lo['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v)),
+                                'Mahalanobis AUROC': pm('unseen_gate_mahal_auroc_mean', 'unseen_gate_mahal_auroc_std'),
+                                'Mahalanobis catch at 5% FPR': pm('unseen_gate_mahal_catch_at_5pct_fpr_mean', 'unseen_gate_mahal_catch_at_5pct_fpr_std'),
+                                'Isolation-forest AUROC': pm('unseen_gate_iso_auroc_mean', 'unseen_gate_iso_auroc_std'),
+                                'Isolation-forest catch at 5% FPR': pm('unseen_gate_iso_catch_at_5pct_fpr_mean', 'unseen_gate_iso_catch_at_5pct_fpr_std'),
+                                'Plain confidence AUROC': pm('unseen_gate_one_minus_conf_auroc_mean', 'unseen_gate_one_minus_conf_auroc_std'),
+                                'Plain confidence catch at 5% FPR': pm('unseen_gate_one_minus_conf_catch_at_5pct_fpr_mean', 'unseen_gate_one_minus_conf_catch_at_5pct_fpr_std')})
+            t6e.to_csv(T / 't6e_gate_separability.csv', index=False)
+            md.append('## Table 6e. Threshold-free separability of the withheld subtype from the seen-subtype test set: AUROC of each novelty score (and of one minus '
+                      'confidence), and the fraction of withheld flights caught at the score cut that withholds 5 percent of seen flights\n\n' + md_table(t6e))
         md.append('## Table 6d. Distributional abstention gate: fraction of flights withheld on the withheld subtype and on the seen-subtype test set (thresholds at the '
                   '95th percentile of the calibration flights), and the combined policy\n\n' + md_table(t6d))
         fig, ax = plt.subplots(figsize=(7.2, 3.2))
@@ -323,6 +334,26 @@ def main():
     axes[-1].set_xlabel('Time since log start (s)'); axes[0].legend(frameon=False, ncol=4, fontsize=7, loc='lower left')
     axes[-1].text(0.99, 0.02, 'shaded: receiver-derived disturbance', transform=axes[-1].transAxes, ha='right', fontsize=6)
     save(fig, 'f_whelan_timelines')
+
+    # ---------------------------------------------------------------- T7d onset localisation
+    if (R / 'e5_onset_summary.csv').exists():
+        e5 = pd.read_csv(R / 'e5_onset_summary.csv')
+        e5['family'] = e5['family'].map(LABEL); e5['subtype'] = e5['subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v if v != 'none' else ''))
+        t7d = e5.rename(columns={'family': 'Family', 'subtype': 'Subtype', 'n': 'Flights', 'detected_within_60s': 'Detected within 60 s',
+                                 'median_abs_error_s': 'Median |onset error| (s)', 'within_10s': 'Within 10 s', 'median_signed_error_s': 'Median signed error (s)',
+                                 'early_alert_rate': 'Early or false alert rate'})
+        t7d.to_csv(T / 't7d_onset_localisation.csv', index=False)
+        md.append('## Table 7d. Onset localisation on held-out flights with the declared alert rule against the logged onset (one fitted pipeline); for nominal '
+                  'flights the last column is the false-alert rate\n\n' + md_table(t7d, '.2f'))
+        det = pd.read_csv(R / 'e5_onset_localisation.csv'); att = det[(det.family != 'nominal') & det.onset_error_s.notna()]
+        if len(att):
+            fig, ax = plt.subplots(figsize=(6.4, 3.0))
+            order = [st for st in SUBTYPE_LABEL if st in set(att.subtype)]
+            data = [att.loc[att.subtype == st, 'onset_error_s'].to_numpy() for st in order]
+            ax.boxplot(data, tick_labels=[SUBTYPE_LABEL[st] for st in order], showfliers=True, whis=(5, 95))
+            ax.axhline(0, ls='--', lw=0.8, color='k'); ax.set_ylabel('Estimated minus logged onset (s)')
+            ax.set_title('Onset localisation error on held-out flights'); plt.setp(ax.get_xticklabels(), rotation=25, ha='right', fontsize=7)
+            save(fig, 'f_onset_localisation')
 
     # ---------------------------------------------------------------- T8 feature importance, T9 flight-model coefficients
     if (R / 'e1_rep0_window_feature_importance.csv').exists():
