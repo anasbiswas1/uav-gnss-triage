@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 
 CLASSES = ['nominal', 'spoof', 'gps_degrade', 'sensor_fault']
+SUBTYPE_LABEL = {'jump': 'Jump', 'drift_incoherent': 'Incoherent drift', 'drift_coherent': 'Coherent drift', 'off_then_ok': 'Receiver silence',
+                 'stuck_then_ok': 'Frozen receiver output', 'no_fix_then_ok': 'No-fix reporting', 'baro_stuck': 'Frozen barometer', 'mag_stuck': 'Frozen magnetometer'}
 COARSE = ['nominal', 'gnss_chain', 'non_gnss_fault']
 LABEL = {'nominal': 'Nominal', 'spoof': 'Spoof', 'gps_degrade': 'GNSS degradation', 'sensor_fault': 'Sensor fault',
          'gnss_chain': 'GNSS-chain inconsistency', 'non_gnss_fault': 'Non-GNSS fault',
@@ -165,7 +167,7 @@ def main():
                             'operational_abstain_rate': 'Operational abstention'})
     t5.to_csv(T / 't5_conformal.csv', index=False)
     md.append('## Table 5. Class-conditional conformal prediction sets at the flight level, mean ± std over 5 repetitions (balanced test sets)\n\n' + md_table(t5))
-    agg['aggregation'] = agg['aggregation'].map(LABEL)
+    agg['aggregation'] = agg['aggregation'].map(LABEL); agg['family'] = agg['family'].map(LABEL)
     sub = agg[(agg.aggregation == LABEL['stacked']) & (agg.alpha == 0.1)]
     sub = sub.assign(abstain_rate=sub['operational_abstain_rate'])
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.0), sharey=True, gridspec_kw={'wspace': 0.12, 'width_ratios': [4, 3]})
@@ -207,41 +209,66 @@ def main():
     ax.set_title('Risk-coverage, flight level'); ax.legend(frameon=False)
     save(fig, 'f_risk_coverage')
 
-    # ---------------------------------------------------------------- T6 leave-one-subtype-out
+    # ---------------------------------------------------------------- T6 leave-one-subtype-out (single-fit design)
     lo = pd.read_csv(R / 'e2_leave_one_subtype_out.csv')
-    t6 = pd.DataFrame({'Held-out family': lo['held_out_family'].map(LABEL), 'Held-out subtype': lo['held_out_subtype'],
-                       'n': lo['n_held'], 'Fine accuracy': lo['acc_on_held'], 'Coarse accuracy': lo['coarse_acc_on_held'],
-                       'Mean confidence': lo['mean_conf_on_held'], 'Fine coverage (0.10)': lo['coverage_a0.1'],
-                       'Operational abstention (0.10)': lo['operational_abstain_a0.1'], 'Coarse coverage (0.10)': lo['coarse_coverage_a0.1'],
-                       'Predicted as': lo['pred_dist_on_held']})
+    ps = pd.read_csv(R / 'e2_per_seed.csv') if (R / 'e2_per_seed.csv').exists() else None
+    n_seeds = int(ps['seed'].nunique()) if ps is not None else 1
+    pm = lambda a, b: [f'{m_:.3f} ± {s_:.3f}' for m_, s_ in zip(lo[a], lo[b])]
+    t6 = pd.DataFrame({'Held-out family': lo['held_out_family'].map(LABEL), 'Held-out subtype': lo['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v)),
+                       'n unseen': lo['unseen_n_mean'].round(0).astype(int), 'n seen test': lo['seen_n_mean'].round(0).astype(int),
+                       'Fine accuracy, unseen': pm('unseen_acc_mean', 'unseen_acc_std'), 'Fine accuracy, seen': pm('seen_acc_mean', 'seen_acc_std'),
+                       'Coarse accuracy, unseen': pm('unseen_coarse_acc_mean', 'unseen_coarse_acc_std'), 'Coarse accuracy, seen': pm('seen_coarse_acc_mean', 'seen_coarse_acc_std'),
+                       'Mean confidence, unseen': pm('unseen_mean_conf_mean', 'unseen_mean_conf_std'), 'Mean confidence, seen': pm('seen_mean_conf_mean', 'seen_mean_conf_std')})
     t6.to_csv(T / 't6_leave_one_subtype_out.csv', index=False)
-    md.append('## Table 6. Unseen-subtype evaluation (each subtype held out of training and calibration)\n\n' + md_table(t6))
-    if 'control_acc' in lo.columns:
-        t6b = pd.DataFrame({'Held-out subtype': lo['held_out_subtype'], 'Unseen n': lo['n_held'], 'Control n': lo['control_n_flights'] if 'control_n_flights' in lo.columns else lo['control_n'],
-                            'Unseen: fine accuracy': lo['acc_on_held'], 'Seen control: fine accuracy': lo['control_acc'],
-                            'Unseen: coarse accuracy': lo['coarse_acc_on_held'], 'Seen control: coarse accuracy': lo['control_coarse_acc'],
-                            'Unseen: mean confidence': lo['mean_conf_on_held'], 'Seen control: mean confidence': lo['control_mean_conf'],
-                            'Unseen: fine coverage (0.10)': lo['coverage_a0.1'], 'Seen control: fine coverage (0.10)': lo['control_coverage_a0.1']})
-        t6b.to_csv(T / 't6b_unseen_vs_matched_control.csv', index=False)
-        md.append('## Table 6b. Unseen subtype versus a matched-size control of seen subtypes from the same family (same training allocation)\n\n' + md_table(t6b))
+    md.append(f'## Table 6. Unseen-subtype evaluation: one fitted pipeline per hold-out (single training and calibration set) evaluated on the withheld subtype and on a '
+              f'disjoint seen-subtype test set from the same family, mean ± std over {n_seeds} seeds\n\n' + md_table(t6))
+    t6b = pd.DataFrame({'Held-out subtype': lo['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v)),
+                        'Fine coverage (0.10), unseen': pm('unseen_coverage_a0.1_mean', 'unseen_coverage_a0.1_std'), 'Fine coverage (0.10), seen': pm('seen_coverage_a0.1_mean', 'seen_coverage_a0.1_std'),
+                        'Coarse coverage (0.10), unseen': pm('unseen_coarse_coverage_a0.1_mean', 'unseen_coarse_coverage_a0.1_std'), 'Coarse coverage (0.10), seen': pm('seen_coarse_coverage_a0.1_mean', 'seen_coarse_coverage_a0.1_std'),
+                        'Operational abstention (0.10), unseen': pm('unseen_operational_abstain_a0.1_mean', 'unseen_operational_abstain_a0.1_std'), 'Operational abstention (0.10), seen': pm('seen_operational_abstain_a0.1_mean', 'seen_operational_abstain_a0.1_std'),
+                        'Predicted as (unseen, seed 0)': lo['unseen_pred_dist_seed0']})
+    t6b.to_csv(T / 't6b_unseen_vs_seen_coverage.csv', index=False)
+    md.append('## Table 6b. Same fitted pipelines: conformal coverage and operational abstention on the withheld subtype and on the seen-subtype test set\n\n' + md_table(t6b))
     if (R / 'e2_splits.csv').exists():
-        sp = pd.read_csv(R / 'e2_splits.csv'); sp['family'] = sp['family'].map(LABEL)
-        t6c = sp.rename(columns={'held_out_subtype': 'Held-out subtype', 'family': 'Family', 'n_train': 'Train', 'n_cal': 'Calibration',
-                                 'rank_alpha0.1': 'Rank (0.10)', 'rank_alpha0.2': 'Rank (0.20)', 'control_n_train': 'Control train', 'control_n_cal': 'Control calibration'})
+        sp = pd.read_csv(R / 'e2_splits.csv'); sp = sp[sp.seed == 0].drop(columns=['seed']); sp['family'] = sp['family'].map(LABEL)
+        sp['held_out_subtype'] = sp['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v))
+        t6c = sp.rename(columns={'held_out_subtype': 'Held-out subtype', 'family': 'Family', 'n_train': 'Train', 'n_cal': 'Calibration', 'n_seen_test': 'Seen test',
+                                 'rank_alpha0.1': 'Rank (0.10)', 'rank_alpha0.2': 'Rank (0.20)', 'rank_at_max_alpha0.1': 'Threshold at max score (0.10)'})
         t6c.to_csv(T / 't6c_holdout_allocation.csv', index=False)
-        md.append('## Table 6c. Hold-out allocation per family and the conformal order-statistic ranks used\n\n' + md_table(t6c, '.0f'))
+        md.append('## Table 6c. Hold-out allocation per family (identical across seeds), test-set sizes, and the conformal order-statistic ranks; where the rank equals the '
+                  'calibration size the threshold is the largest calibration score\n\n' + md_table(t6c, '.0f'))
+    if 'unseen_gate_mahal_withheld_mean' in lo.columns:
+        t6d = pd.DataFrame({'Held-out subtype': lo['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v)),
+                            'Mahalanobis gate, unseen': pm('unseen_gate_mahal_withheld_mean', 'unseen_gate_mahal_withheld_std'),
+                            'Mahalanobis gate, seen': pm('seen_gate_mahal_withheld_mean', 'seen_gate_mahal_withheld_std'),
+                            'Isolation-forest gate, unseen': pm('unseen_gate_iso_withheld_mean', 'unseen_gate_iso_withheld_std'),
+                            'Isolation-forest gate, seen': pm('seen_gate_iso_withheld_mean', 'seen_gate_iso_withheld_std'),
+                            'Conformal policy alone, unseen': pm('unseen_operational_abstain_a0.1_mean', 'unseen_operational_abstain_a0.1_std'),
+                            'Conformal or Mahalanobis gate, unseen': pm('unseen_gate_mahal_or_conformal_withheld_mean', 'unseen_gate_mahal_or_conformal_withheld_std'),
+                            'Conformal or Mahalanobis gate, seen': pm('seen_gate_mahal_or_conformal_withheld_mean', 'seen_gate_mahal_or_conformal_withheld_std')})
+        t6d.to_csv(T / 't6d_distributional_gate.csv', index=False)
+        md.append('## Table 6d. Distributional abstention gate: fraction of flights withheld on the withheld subtype and on the seen-subtype test set (thresholds at the '
+                  '95th percentile of the calibration flights), and the combined policy\n\n' + md_table(t6d))
+        fig, ax = plt.subplots(figsize=(7.2, 3.2))
+        x = np.arange(len(lo)); w = 0.26
+        ax.bar(x - w, lo['unseen_operational_abstain_a0.1_mean'], w, yerr=lo['unseen_operational_abstain_a0.1_std'], label='Conformal policy alone', capsize=2)
+        ax.bar(x, lo['unseen_gate_mahal_withheld_mean'], w, yerr=lo['unseen_gate_mahal_withheld_std'], label='Mahalanobis gate', capsize=2)
+        ax.bar(x + w, lo['unseen_gate_mahal_or_conformal_withheld_mean'], w, yerr=lo['unseen_gate_mahal_or_conformal_withheld_std'], label='Combined', capsize=2)
+        ax.plot(x, lo['seen_gate_mahal_or_conformal_withheld_mean'], 'kv', ms=5, label='Combined, seen-subtype test set')
+        ax.set_xticks(x); ax.set_xticklabels([SUBTYPE_LABEL.get(v, v) for v in lo['held_out_subtype']], rotation=25, ha='right', fontsize=7); ax.set_ylim(0, 1.05)
+        ax.set_ylabel('Fraction withheld'); ax.set_title('Withheld subtype: what each abstention mechanism catches', pad=24)
+        ax.legend(frameon=False, ncol=4, fontsize=7, loc='lower center', bbox_to_anchor=(0.5, 1.0))
+        save(fig, 'f_distributional_gate')
     fig, ax = plt.subplots(figsize=(7.2, 3.4))
     x = np.arange(len(lo)); w = 0.2
-    ax.bar(x - 1.5 * w, lo['acc_on_held'], w, label='Fine accuracy')
-    ax.bar(x - 0.5 * w, lo['coarse_acc_on_held'], w, label='Coarse accuracy')
-    ax.bar(x + 0.5 * w, lo['coverage_a0.1'], w, label='Fine coverage (0.10)')
-    ax.bar(x + 1.5 * w, lo['coarse_coverage_a0.1'], w, label='Coarse coverage (0.10)')
-    ax.plot(x, lo['mean_conf_on_held'], 'k_', ms=14, mew=2, label='Mean confidence')
-    if 'control_acc' in lo.columns:
-        ax.plot(x - 1.5 * w, lo['control_acc'], 'kv', ms=5, label='Seen control: fine accuracy')
+    ax.bar(x - 1.5 * w, lo['unseen_acc_mean'], w, yerr=lo['unseen_acc_std'], label='Fine accuracy, unseen', capsize=2)
+    ax.bar(x - 0.5 * w, lo['seen_acc_mean'], w, yerr=lo['seen_acc_std'], label='Fine accuracy, seen test', capsize=2)
+    ax.bar(x + 0.5 * w, lo['unseen_coverage_a0.1_mean'], w, yerr=lo['unseen_coverage_a0.1_std'], label='Fine coverage (0.10), unseen', capsize=2)
+    ax.bar(x + 1.5 * w, lo['seen_coverage_a0.1_mean'], w, yerr=lo['seen_coverage_a0.1_std'], label='Fine coverage (0.10), seen test', capsize=2)
+    ax.plot(x, lo['unseen_mean_conf_mean'], 'k_', ms=14, mew=2, label='Mean confidence, unseen')
     ax.axhline(0.9, ls='--', lw=0.8, color='k')
-    ax.set_xticks(x); ax.set_xticklabels(lo['held_out_subtype'], rotation=25, ha='right'); ax.set_ylim(0, 1.05)
-    ax.set_title('Held-out subtype: accuracy and coverage collapse while confidence stays high', pad=28)
+    ax.set_xticks(x); ax.set_xticklabels([SUBTYPE_LABEL.get(v, v) for v in lo['held_out_subtype']], rotation=25, ha='right', fontsize=7); ax.set_ylim(0, 1.05)
+    ax.set_title('Same fitted pipeline on the withheld subtype and on a seen-subtype test set', pad=28)
     ax.legend(frameon=False, ncol=3, fontsize=7, loc='lower center', bbox_to_anchor=(0.5, 1.0))
     save(fig, 'f_unseen_subtype_collapse')
 

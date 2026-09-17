@@ -247,6 +247,42 @@ def stacked_pipeline(W_tr, feats, seed, n_folds=4):
     return wmodel, fmodel, agg_cols, T
 
 
+class NoveltyGate:
+    """Distributional abstention: flags a flight whose aggregate evidence lies outside the calibration distribution.
+    Two scorers on standardised flight aggregates fitted on training flights: Mahalanobis distance with Ledoit-Wolf
+    covariance, and an isolation forest. Thresholds are the (1 - q) quantile of the calibration flights' scores, so
+    in-distribution flights are withheld by the gate at rate about q."""
+
+    def __init__(self, q=0.05, seed=0):
+        self.q, self.seed = q, seed
+
+    def fit(self, A_tr, cols):
+        from sklearn.covariance import LedoitWolf
+        from sklearn.ensemble import IsolationForest
+        X = A_tr[cols].to_numpy(dtype=float)
+        self.cols = cols
+        self.med = np.nanmedian(X, 0); X = np.where(np.isnan(X), self.med, X)
+        self.mu, self.sd = X.mean(0), X.std(0) + 1e-9
+        Z = (X - self.mu) / self.sd
+        self.lw = LedoitWolf().fit(Z)
+        self.iso = IsolationForest(n_estimators=300, random_state=self.seed).fit(Z)
+        return self
+
+    def scores(self, A):
+        X = A[self.cols].to_numpy(dtype=float); X = np.where(np.isnan(X), self.med, X)
+        Z = (X - self.mu) / self.sd
+        return {'mahal': self.lw.mahalanobis(Z), 'iso': -self.iso.score_samples(Z)}
+
+    def calibrate(self, A_cal):
+        sc = self.scores(A_cal)
+        self.th = {k: float(np.quantile(v, 1 - self.q)) for k, v in sc.items()}
+        return self
+
+    def flags(self, A):
+        sc = self.scores(A)
+        return {k: (sc[k] > self.th[k]) for k in sc}
+
+
 def stacked_scores(W, P, fmodel, agg_cols):
     A = flight_aggregates(W, P)
     S = A[['flight_id', 'family', 'subtype']].copy()
@@ -348,6 +384,7 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--reps', type=int, default=5)
     ap.add_argument('--only', default='all', help='comma-separated subset of e0,e1,e2,e3 to run (others are skipped; existing files kept)')
+    ap.add_argument('--e2_reps', type=int, default=3, help='seeds for the unseen-subtype experiment')
     args = ap.parse_args()
     RUN = set(['e0', 'e1', 'e2', 'e3']) if args.only == 'all' else set(args.only.split(','))
     fdir, out = pathlib.Path(args.features), pathlib.Path(args.out)
@@ -477,73 +514,87 @@ def main():
         print('\n[E1] extra flights beyond the balanced test set (scored with the same thresholds), mean over reps:\n',
               EX.groupby(['aggregation', 'level', 'alpha', 'family'])[['n', 'acc', 'coverage', 'operational_abstain_rate']].mean().round(3).to_string())
 
-    # ---------------- E2 leave-one-subtype-out (stacked pipeline) with allocation export and matched control
-    def allocate(F_in, rng):
-        tr, ca, alloc = [], [], {}
-        for c in CLASSES:
-            ids = F_in.loc[F_in.family == c, 'flight_id'].tolist(); rng.shuffle(ids)
-            n_tr = min(20, len(ids) // 2); n_ca = min(20, len(ids) - n_tr)
-            tr += ids[:n_tr]; ca += ids[n_tr:n_tr + n_ca]; alloc[c] = (n_tr, n_ca)
-        return tr, ca, alloc
-
-    def evaluate_holdout(W_tr, W_ca, W_h, fam, seed):
-        wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, seed)
-        S_cal = stacked_scores(W_ca, predict_proba(wmodel, W_ca[feats]), fmodel, agg_cols)
-        S_h = stacked_scores(W_h, predict_proba(wmodel, W_h[feats]), fmodel, agg_cols)
+    # ---------------- E2 leave-one-subtype-out: ONE fitted pipeline per hold-out and seed, evaluated on a disjoint
+    # seen-subtype test set and on the withheld subtype, so model, training volume and thresholds are held fixed
+    def score_set(S, fam, S_cal):
         cfam = COARSE[fam]
-        row = {'n': len(S_h), 'acc': float((S_h.pred == fam).mean()), 'coarse_acc': float((S_h.coarse_pred == cfam).mean()),
-               'pred_dist': json.dumps(S_h.pred.value_counts().to_dict()), 'mean_conf': float(S_h.conf.mean())}
+        row = {'n': len(S), 'acc': float((S.pred == fam).mean()), 'coarse_acc': float((S.coarse_pred == cfam).mean()),
+               'mean_conf': float(S.conf.mean()), 'pred_dist': json.dumps(S.pred.value_counts().to_dict())}
         for alpha in (0.10, 0.20):
-            th = conformal_thresholds(S_cal, alpha); sets = conformal_sets(S_h, th)
+            th = conformal_thresholds(S_cal, alpha); sets = conformal_sets(S, th)
             row[f'coverage_a{alpha}'] = float(np.mean([fam in x for x in sets]))
-            row[f'operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S_h.pred, sets)]))
-            thc = conformal_thresholds(S_cal, alpha, 'coarse'); csets = conformal_sets(S_h, thc, 'coarse')
+            row[f'operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S.pred, sets)]))
+            thc = conformal_thresholds(S_cal, alpha, 'coarse'); csets = conformal_sets(S, thc, 'coarse')
             row[f'coarse_coverage_a{alpha}'] = float(np.mean([cfam in x for x in csets]))
-            row[f'coarse_operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S_h.coarse_pred, csets)]))
-        return row, S_h
+            row[f'coarse_operational_abstain_a{alpha}'] = float(np.mean([(len(x) != 1) or (p not in x) for p, x in zip(S.coarse_pred, csets)]))
+        return row
 
-    loso, splits = [], []
+    per_seed, splits = [], []
+    E2_SEEDS = list(range(args.e2_reps))
     for fam in (CLASSES[1:] if 'e2' in RUN else []):
         for st in sorted(F.loc[F.family == fam, 'subtype'].unique()):
-            held = set(F.loc[F.subtype == st, 'flight_id'])
-            F_in = F[~F.flight_id.isin(held)]
-            rng = np.random.RandomState(7)
-            tr, ca, alloc = allocate(F_in, rng)
-            row_h, S_h = evaluate_holdout(sub(Ws, tr), sub(Ws, ca), sub(Ws, held), fam, 7)
-            # matched-size control: withhold the same number of flights from the SEEN subtypes of the same family,
-            # allocate train/calibration from the remainder with the same rule, evaluate on the withheld seen flights
-            # control size is the held-out size capped at half of the seen flights, so that every seen subtype keeps at least
-            # half of its flights in training and the control never degenerates into an unseen-subtype test
-            seen = F[(F.family == fam) & (F.subtype != st)]
-            ctrl = set()
-            for st2, d2 in seen.groupby('subtype'):
-                ids2 = d2['flight_id'].tolist(); np.random.RandomState(7).shuffle(ids2)
-                ctrl |= set(ids2[:len(ids2) // 2])
-            ctrl = set(sorted(ctrl)[:len(held)]) if len(ctrl) > len(held) else ctrl
-            F_in_c = F[~F.flight_id.isin(ctrl)]
-            tr_c, ca_c, alloc_c = allocate(F_in_c, np.random.RandomState(7))
-            row_c, _ = evaluate_holdout(sub(Ws, tr_c), sub(Ws, ca_c), sub(Ws, ctrl), fam, 7)
-            for c in CLASSES:
-                n_ca = alloc[c][1]
-                splits.append({'held_out_subtype': st, 'family': c, 'n_train': alloc[c][0], 'n_cal': n_ca,
-                               'rank_alpha0.1': int(np.ceil((n_ca + 1) * 0.9)), 'rank_alpha0.2': int(np.ceil((n_ca + 1) * 0.8)),
-                               'control_n_train': alloc_c[c][0], 'control_n_cal': alloc_c[c][1]})
-            loso.append({'held_out_family': fam, 'held_out_subtype': st, 'n_held': row_h['n'], 'acc_on_held': row_h['acc'],
-                         'control_n_flights': len(ctrl),
-                         'coarse_acc_on_held': row_h['coarse_acc'], 'pred_dist_on_held': row_h['pred_dist'], 'mean_conf_on_held': row_h['mean_conf'],
-                         'coverage_a0.1': row_h['coverage_a0.1'], 'operational_abstain_a0.1': row_h['operational_abstain_a0.1'],
-                         'coarse_coverage_a0.1': row_h['coarse_coverage_a0.1'], 'coarse_operational_abstain_a0.1': row_h['coarse_operational_abstain_a0.1'],
-                         'coverage_a0.2': row_h['coverage_a0.2'], 'coarse_coverage_a0.2': row_h['coarse_coverage_a0.2'],
-                         'control_n': row_c['n'], 'control_acc': row_c['acc'], 'control_coarse_acc': row_c['coarse_acc'],
-                         'control_mean_conf': row_c['mean_conf'], 'control_coverage_a0.1': row_c['coverage_a0.1'],
-                         'control_coarse_coverage_a0.1': row_c['coarse_coverage_a0.1']})
-            S_h.assign(held_out_subtype=st).to_csv(out / f'e2_held_{st}_flight_scores.csv', index=False)
-    if loso:
-        LOSO = pd.DataFrame(loso); LOSO.to_csv(out / 'e2_leave_one_subtype_out.csv', index=False)
+            held = F.loc[F.subtype == st, 'flight_id'].tolist()
+            for seed in E2_SEEDS:
+                rng = np.random.RandomState(700 + seed)
+                seen = F.loc[(F.family == fam) & (F.subtype != st), 'flight_id'].tolist(); rng.shuffle(seen)
+                n_tr = len(seen) // 3; n_ca = len(seen) // 3
+                tr, ca = seen[:n_tr], seen[n_tr:n_tr + n_ca]; seen_test = seen[n_tr + n_ca:]
+                alloc = {fam: (n_tr, n_ca, len(seen_test))}
+                for c in CLASSES:
+                    if c == fam:
+                        continue
+                    ids = F.loc[F.family == c, 'flight_id'].tolist(); rng.shuffle(ids)
+                    tr += ids[:20]; ca += ids[20:40]; alloc[c] = (20, 20, 0)
+                W_tr, W_ca = sub(Ws, tr), sub(Ws, ca)
+                wmodel, fmodel, agg_cols, T = stacked_pipeline(W_tr, feats, 700 + seed)
+                A_tr = flight_aggregates(W_tr, stacked_pipeline.last_oof)
+                A_ca = flight_aggregates(W_ca, predict_proba(wmodel, W_ca[feats]))
+                A_seen = flight_aggregates(sub(Ws, seen_test), predict_proba(wmodel, sub(Ws, seen_test)[feats]))
+                A_held = flight_aggregates(sub(Ws, held), predict_proba(wmodel, sub(Ws, held)[feats]))
+                gate = NoveltyGate(q=0.05, seed=700 + seed).fit(A_tr, agg_cols).calibrate(A_ca)
+                S_cal = stacked_scores(W_ca, predict_proba(wmodel, W_ca[feats]), fmodel, agg_cols)
+                S_seen = stacked_scores(sub(Ws, seen_test), predict_proba(wmodel, sub(Ws, seen_test)[feats]), fmodel, agg_cols)
+                S_held = stacked_scores(sub(Ws, held), predict_proba(wmodel, sub(Ws, held)[feats]), fmodel, agg_cols)
+                r_seen, r_held = score_set(S_seen, fam, S_cal), score_set(S_held, fam, S_cal)
+                # distributional abstention gate: fraction withheld by each scorer, and combined with the conformal policy
+                for tag_, S_, A_, r_ in (('seen', S_seen, A_seen, r_seen), ('unseen', S_held, A_held, r_held)):
+                    fl = gate.flags(A_)
+                    th = conformal_thresholds(S_cal, 0.10); sets = conformal_sets(S_, th)
+                    conf_abst = np.array([(len(x) != 1) or (p not in x) for p, x in zip(S_.pred, sets)])
+                    for k in ('mahal', 'iso'):
+                        r_[f'gate_{k}_withheld'] = float(fl[k].mean())
+                        r_[f'gate_{k}_or_conformal_withheld'] = float((fl[k] | conf_abst).mean())
+                    S_['gate_mahal'] = fl['mahal']; S_['gate_iso'] = fl['iso']
+                per_seed.append({'held_out_family': fam, 'held_out_subtype': st, 'seed': seed,
+                                 **{f'unseen_{k}': v for k, v in r_held.items()}, **{f'seen_{k}': v for k, v in r_seen.items()}})
+                for c in CLASSES:
+                    n_ca_c = alloc[c][1]
+                    splits.append({'held_out_subtype': st, 'seed': seed, 'family': c, 'n_train': alloc[c][0], 'n_cal': n_ca_c,
+                                   'n_seen_test': alloc[c][2], 'rank_alpha0.1': int(np.ceil((n_ca_c + 1) * 0.9)),
+                                   'rank_alpha0.2': int(np.ceil((n_ca_c + 1) * 0.8)), 'rank_at_max_alpha0.1': int(np.ceil((n_ca_c + 1) * 0.9)) >= n_ca_c})
+                if seed == 0:
+                    S_held.assign(held_out_subtype=st).to_csv(out / f'e2_held_{st}_flight_scores.csv', index=False)
+                    pd.DataFrame({'flight_id': A_ca['flight_id'], **gate.scores(A_ca)}).to_csv(out / f'e2_gate_cal_scores_{st}.csv', index=False)
+                    S_seen.assign(held_out_subtype=st).to_csv(out / f'e2_seen_{st}_flight_scores.csv', index=False)
+    if per_seed:
+        PS = pd.DataFrame(per_seed); PS.to_csv(out / 'e2_per_seed.csv', index=False)
+        num = [c for c in PS.columns if c not in ('held_out_family', 'held_out_subtype', 'seed', 'unseen_pred_dist', 'seen_pred_dist')]
+        g = PS.groupby(['held_out_family', 'held_out_subtype'], sort=False)
+        LOSO = g[num].mean().round(4); LOSO_sd = g[num].std(ddof=0).round(4)
+        LOSO.columns = [f'{c}_mean' for c in LOSO.columns]; LOSO_sd.columns = [f'{c}_std' for c in LOSO_sd.columns]
+        LOSO = pd.concat([LOSO, LOSO_sd], axis=1).reset_index()
+        LOSO['unseen_pred_dist_seed0'] = g['unseen_pred_dist'].first().to_numpy()
+        LOSO.to_csv(out / 'e2_leave_one_subtype_out.csv', index=False)
         pd.DataFrame(splits).to_csv(out / 'e2_splits.csv', index=False)
-        print('\n[E2] leave-one-subtype-out (stacked, flight level, unseen subtype) with matched-size seen-subtype control:\n',
-          LOSO[['held_out_family', 'held_out_subtype', 'n_held', 'acc_on_held', 'coarse_acc_on_held', 'mean_conf_on_held', 'coverage_a0.1',
-                'operational_abstain_a0.1', 'coarse_coverage_a0.1', 'control_acc', 'control_coarse_acc', 'control_mean_conf', 'control_coverage_a0.1']].round(3).to_string(index=False))
+        show = ['held_out_family', 'held_out_subtype', 'unseen_n_mean', 'seen_n_mean', 'unseen_acc_mean', 'seen_acc_mean', 'unseen_coarse_acc_mean',
+                'seen_coarse_acc_mean', 'unseen_mean_conf_mean', 'seen_mean_conf_mean', 'unseen_coverage_a0.1_mean', 'seen_coverage_a0.1_mean',
+                'unseen_coarse_coverage_a0.1_mean', 'seen_coarse_coverage_a0.1_mean', 'unseen_operational_abstain_a0.1_mean']
+        gate_show = ['held_out_subtype', 'unseen_gate_mahal_withheld_mean', 'seen_gate_mahal_withheld_mean', 'unseen_gate_iso_withheld_mean', 'seen_gate_iso_withheld_mean',
+                     'unseen_gate_mahal_or_conformal_withheld_mean', 'seen_gate_mahal_or_conformal_withheld_mean', 'unseen_operational_abstain_a0.1_mean', 'seen_operational_abstain_a0.1_mean']
+        print(f'\n[E2] leave-one-subtype-out, one fitted pipeline per hold-out evaluated on the withheld subtype and on a disjoint seen-subtype test set, mean over {len(E2_SEEDS)} seeds:\n',
+              LOSO[show].round(3).to_string(index=False))
+        print(f'\n[E4] distributional abstention gate (threshold at the 95th percentile of calibration scores), fraction withheld, mean over {len(E2_SEEDS)} seeds:\n',
+              LOSO[gate_show].round(3).to_string(index=False))
 
     # ---------------- E3 Whelan case studies (stacked pipeline)
     if len(Ww) and 'e3' in RUN:
