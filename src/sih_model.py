@@ -32,6 +32,7 @@ Usage:
   python sih_model.py --features <features dir> --out <reports dir>
 """
 import argparse
+import os
 import json
 import pathlib
 import warnings
@@ -408,8 +409,9 @@ def main():
     ap.add_argument('--only', default='all', help='comma-separated subset of e0,e1,e2,e3 to run (others are skipped; existing files kept)')
     ap.add_argument('--e2_reps', type=int, default=3, help='seeds for the unseen-subtype experiment')
     ap.add_argument('--real_features', default=None, help='features folder for real PX4 logs without ground truth (E6)')
+    ap.add_argument('--e7_epochs', type=int, default=6, help='training epochs for the sequence baseline (E7)')
     args = ap.parse_args()
-    RUN = set(['e0', 'e1', 'e2', 'e3', 'e5']) if args.only == 'all' else set(args.only.split(','))
+    RUN = set(['e0', 'e1', 'e2', 'e3', 'e5', 'e7']) if args.only == 'all' else set(args.only.split(','))
     if args.real_features and args.only == 'all':
         RUN.add('e6')
     fdir, out = pathlib.Path(args.features), pathlib.Path(args.out)
@@ -688,11 +690,11 @@ def main():
         summ = att.groupby(['method', 'family', 'subtype']).apply(lambda g: pd.Series({
             'n': len(g), 'detected_within_60s': float(g['detected_within_60s'].fillna(False).mean()),
             'median_abs_error_s': float(g['onset_error_s'].abs().median()) if g['onset_error_s'].notna().any() else np.nan,
-            'within_10s': float((g['onset_error_s'].abs() <= 10.0).mean()), 'median_signed_error_s': float(g['onset_error_s'].median()) if g['onset_error_s'].notna().any() else np.nan,
+            'within_10s': float((g['onset_error_s'].abs() <= 10.0).mean()), 'within_30s': float((g['onset_error_s'].abs() <= 30.0).mean()), 'median_signed_error_s': float(g['onset_error_s'].median()) if g['onset_error_s'].notna().any() else np.nan,
             'early_alert_rate': float(g['early_alert'].mean())})).reset_index()
         nom = E5[E5.family == 'nominal']
         summ = pd.concat([summ] + [pd.DataFrame([{'method': m, 'family': 'nominal', 'subtype': 'none', 'n': int((nom.method == m).sum()), 'detected_within_60s': np.nan,
-                                                   'median_abs_error_s': np.nan, 'within_10s': np.nan, 'median_signed_error_s': np.nan,
+                                                   'median_abs_error_s': np.nan, 'within_10s': np.nan, 'within_30s': np.nan, 'median_signed_error_s': np.nan,
                                                    'early_alert_rate': float(nom.loc[nom.method == m, 'false_alert'].mean())}]) for m in ('rule', 'cusum')], ignore_index=True)
         summ.to_csv(out / 'e5_onset_summary.csv', index=False)
         print('\n[E5] onset localisation against the logged onset (one fitted pipeline): declared rule and CUSUM baseline (k = 0.5, h = 0.75); early alert = any episode starting more than 5 s before onset; for nominal flights the last column is the false-alert rate:\n',
@@ -728,6 +730,8 @@ def main():
         gap_q95 = {c: float(np.nanquantile(A_ca[c].to_numpy(dtype=float), 0.95)) for c in gap_cols}
         S_cal = stacked_scores(W_ca, P_ca, fmodel, agg_cols)
         th10, thc10 = conformal_thresholds(S_cal, 0.10), conformal_thresholds(S_cal, 0.10, 'coarse')
+        base_cols = [c for c in feats if not (c.endswith('_d1') or c.endswith('_rmax3') or c.endswith('_rel'))]
+        miss = Wr.groupby('flight_id')[base_cols].apply(lambda d: float(d.isna().to_numpy().mean())).rename('missing_frac')
         Pr = predict_proba(wmodel, Wr[feats]); Pr_t = apply_temperature(Pr, T)
         A_r = flight_aggregates(Wr, Pr)
         S_r = stacked_scores(Wr, Pr, fmodel, agg_cols)
@@ -751,6 +755,7 @@ def main():
             ep[fid] = int(sum(1 for i in range(len(t)) if alert[i] and (i == 0 or not alert[i - 1])))
             fr[fid] = {c: float((Pr_t[idx].argmax(1) == j).mean()) for j, c in enumerate(CLASSES)}
         S_r['alert_episodes'] = S_r['flight_id'].map(ep)
+        S_r['missing_frac'] = S_r['flight_id'].map(miss)
         for c in CLASSES:
             S_r[f'window_frac_{c}'] = S_r['flight_id'].map(lambda f: fr[f][c])
         if Fr is not None and 'flight_id' in Fr.columns:
@@ -774,7 +779,16 @@ def main():
                 'gate_gaprule_withheld': float(S_r.gate_gaprule.mean()),
                 'mean_conf': float(S_r.conf.mean()), 'median_conf': float(S_r.conf.median()),
                 'frac_with_alert_episode': float((S_r.alert_episodes > 0).mean()), 'mean_alert_episodes': float(S_r.alert_episodes.mean()),
-                'nominal_and_not_withheld_frac': float(((S_r.pred == 'nominal') & ~S_r.abstain_fine & ~S_r.gate_mahal).mean())}
+                'nominal_and_not_withheld_frac': float(((S_r.pred == 'nominal') & ~S_r.abstain_fine & ~S_r.gate_mahal).mean()),
+                'missing_frac_mean': float(S_r.missing_frac.mean()), 'missing_frac_median': float(S_r.missing_frac.median()),
+                'missing_frac_max': float(S_r.missing_frac.max()),
+                'gate_withheld_low_missing': float(S_r.loc[S_r.missing_frac <= 0.05, 'gate_mahal'].mean()) if (S_r.missing_frac <= 0.05).any() else np.nan,
+                'gate_withheld_high_missing': float(S_r.loc[S_r.missing_frac > 0.05, 'gate_mahal'].mean()) if (S_r.missing_frac > 0.05).any() else np.nan,
+                'n_low_missing': int((S_r.missing_frac <= 0.05).sum()), 'n_high_missing': int((S_r.missing_frac > 0.05).sum()),
+                'abstain_low_missing': float(S_r.loc[S_r.missing_frac <= 0.05, 'abstain_fine'].mean()) if (S_r.missing_frac <= 0.05).any() else np.nan,
+                'abstain_high_missing': float(S_r.loc[S_r.missing_frac > 0.05, 'abstain_fine'].mean()) if (S_r.missing_frac > 0.05).any() else np.nan,
+                'nominal_low_missing': float((S_r.loc[S_r.missing_frac <= 0.05, 'pred'] == 'nominal').mean()) if (S_r.missing_frac <= 0.05).any() else np.nan,
+                'nominal_high_missing': float((S_r.loc[S_r.missing_frac > 0.05, 'pred'] == 'nominal').mean()) if (S_r.missing_frac > 0.05).any() else np.nan}
         pd.DataFrame([summ]).to_csv(out / 'e6_real_summary.csv', index=False)
         print('\n[E6] real PX4 logs (no ground truth), frozen pipeline trained on simulation only:')
         for k, v in summ.items():
@@ -784,6 +798,180 @@ def main():
                                                 abstain=('abstain_fine', 'mean'), gate=('gate_mahal', 'mean'), conf=('conf', 'mean')).round(3)
             by.index.name = 'px4_version'
             by.to_csv(out / 'e6_real_by_version.csv'); print('\n[E6] by PX4 release (major.minor):\n', by.to_string())
+
+    # ---------------- E7 published architectures under the flight-level protocol
+    if 'e7' in RUN:
+        try:
+            import torch, torch.nn as nn
+            torch.manual_seed(0); torch.set_num_threads(max(1, os.cpu_count() or 1))
+        except ImportError:
+            torch = None; print('[E7] torch not available; the sequence baseline is skipped')
+
+        SEQ = 6                     # windows per sequence (15 s of context)
+
+        def make_sequences(W, feats_, med, mu, sd):
+            """Standardised feature matrix and, per window, the indices of the SEQ windows ending at it (same flight)."""
+            X = ((W[feats_].to_numpy(dtype=float)) )
+            X = np.where(np.isnan(X), med, X); X = (X - mu) / sd
+            idx = np.zeros((len(W), SEQ), dtype=int)
+            for fid, ii in W.groupby('flight_id', sort=False).indices.items():
+                ii = ii[np.argsort(W.iloc[ii]['t_start'].to_numpy())]
+                for k, i in enumerate(ii):
+                    prev = ii[max(0, k - SEQ + 1):k + 1]
+                    pad = np.full(SEQ - len(prev), prev[0]); idx[i] = np.r_[pad, prev]
+            return X.astype(np.float32), idx
+
+        if torch is not None:
+            class SeqNet(nn.Module):
+                def __init__(self, d):
+                    super().__init__(); self.lstm = nn.LSTM(d, 64, batch_first=True); self.gru = nn.GRU(64, 32, batch_first=True); self.out = nn.Linear(32, 4)
+                def forward(self, x):
+                    h, _ = self.lstm(x); h, _ = self.gru(h); return self.out(h[:, -1])
+
+        def train_seq(W_tr, feats_, seed, epochs):
+            """Hybrid LSTM-GRU on sequences of window features (the architecture of reference [6]), class-weighted."""
+            torch.manual_seed(seed); np.random.seed(seed)
+            Xraw = W_tr[feats_].to_numpy(dtype=float)
+            med = np.nanmedian(Xraw, 0); med = np.where(np.isnan(med), 0.0, med)
+            Xf = np.where(np.isnan(Xraw), med, Xraw); mu, sd = Xf.mean(0), Xf.std(0) + 1e-6
+            X, idx = make_sequences(W_tr, feats_, med, mu, sd)
+            y = np.array([CLASSES.index(v) for v in W_tr['window_label']])
+            cw = torch.tensor(len(y) / (4 * np.bincount(y, minlength=4) + 1e-9), dtype=torch.float32)
+            net = SeqNet(X.shape[1]); opt = torch.optim.Adam(net.parameters(), lr=1e-3); lossf = nn.CrossEntropyLoss(weight=cw)
+            Xt, It, yt = torch.tensor(X), torch.tensor(idx), torch.tensor(y)
+            for ep in range(epochs):
+                perm = torch.randperm(len(y))
+                for b in range(0, len(y), 256):
+                    j = perm[b:b + 256]; opt.zero_grad()
+                    loss = lossf(net(Xt[It[j]]), yt[j]); loss.backward(); opt.step()
+            net.eval()
+            return {'net': net, 'med': med, 'mu': mu, 'sd': sd}
+
+        def predict_seq(model, W, feats_):
+            X, idx = make_sequences(W, feats_, model['med'], model['mu'], model['sd'])
+            with torch.no_grad():
+                out = []
+                Xt, It = torch.tensor(X), torch.tensor(idx)
+                for b in range(0, len(W), 2048):
+                    out.append(torch.softmax(model['net'](Xt[It[b:b + 2048]]), 1).numpy())
+            return np.vstack(out)
+
+        def oof_seq(W_tr, feats_, seed, epochs, k=4):
+            from sklearn.model_selection import StratifiedGroupKFold
+            P = np.zeros((len(W_tr), 4)); fam = W_tr['family'].to_numpy(); grp = W_tr['flight_id'].to_numpy()
+            for tr_i, te_i in StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed).split(W_tr, fam, grp):
+                m = train_seq(W_tr.iloc[tr_i], feats_, seed, epochs)
+                P[te_i] = predict_seq(m, W_tr.iloc[te_i], feats_)
+            return P
+
+        def oneclass_fit(W_tr, feats_, seed):
+            """Novelty detector trained on nominal windows only (the approach of reference [5]); flags windows whose
+            isolation-forest score exceeds the 95th percentile of the nominal training windows."""
+            from sklearn.ensemble import IsolationForest
+            nom = W_tr[W_tr.window_label == 'nominal']
+            Xraw = nom[feats_].to_numpy(dtype=float); med = np.nanmedian(Xraw, 0); med = np.where(np.isnan(med), 0.0, med)
+            Xf = np.where(np.isnan(Xraw), med, Xraw); mu, sd = Xf.mean(0), Xf.std(0) + 1e-6
+            iso = IsolationForest(n_estimators=300, random_state=seed).fit((Xf - mu) / sd)
+            th = float(np.quantile(-iso.score_samples((Xf - mu) / sd), 0.95))
+            return {'iso': iso, 'med': med, 'mu': mu, 'sd': sd, 'th': th}
+
+        def oneclass_flags(model, W, feats_):
+            X = W[feats_].to_numpy(dtype=float); X = np.where(np.isnan(X), model['med'], X); X = (X - model['mu']) / model['sd']
+            return -model['iso'].score_samples(X) > model['th']
+
+        def binary_metrics(flags, labels, tag):
+            y = (np.asarray(labels) != 'nominal').astype(int); f = flags.astype(int)
+            return {'tag': tag, 'acc': accuracy_score(y, f), 'macro_f1': f1_score(y, f, average='macro'),
+                    'attack_recall': float(f[y == 1].mean()) if (y == 1).any() else np.nan, 'false_alarm': float(f[y == 0].mean()) if (y == 0).any() else np.nan}
+
+        if torch is not None:
+            try:
+                _m = train_seq(Ws.iloc[:400], feats, 0, 1); _ = predict_seq(_m, Ws.iloc[:100], feats)
+                print('[E7] sequence baseline smoke test passed')
+            except Exception as ex:
+                torch = None; print(f'[E7] sequence baseline disabled after smoke test failure: {type(ex).__name__}: {ex}')
+        rows_leak, rows_flight, rows_loso = [], [], []
+        # --- paired leakage audit for both architectures (same splits as E0)
+        for rep_ in range(args.reps):
+            rng = np.random.RandomState(500 + rep_)
+            tr, ca, te, ex = split_flights(F, rng, n_train=30, n_cal=0, n_test=10 ** 6)
+            W_tr, W_te = sub(Ws, tr), sub(Ws, te)
+            idx = rng.permutation(len(Ws)); k = len(W_tr)
+            W_rtr, W_rte = Ws.iloc[idx[:k]], Ws.iloc[idx[k:]]
+            for tag, (A, Bt) in (('flight_grouped_split', (W_tr, W_te)), ('random_window_split', (W_rtr, W_rte))):
+                if torch is not None:
+                    m = train_seq(A, feats, rep_, args.e7_epochs); P = predict_seq(m, Bt, feats)
+                    rows_leak.append({'rep': rep_, 'model': 'lstm_gru', **window_metrics(P, Bt['window_label'], tag)})
+                oc = oneclass_fit(A, feats, rep_)
+                rows_leak.append({'rep': rep_, 'model': 'one_class', **binary_metrics(oneclass_flags(oc, Bt, feats), Bt['window_label'], tag), 'ece': np.nan, 'nll': np.nan, 'brier': np.nan})
+            print(f'[E7] leakage rep {rep_} done')
+        # --- in-distribution flight level: the same stacking (probability summaries only) on the sequence model, and a
+        #     declared flight rule for the one-class detector (flight flagged when more than 10 percent of windows are flagged)
+        for rep_ in range(args.reps):
+            rng = np.random.RandomState(100 + rep_)
+            tr, ca, te, ex = split_flights(F, rng)
+            W_tr, W_te = sub(Ws, tr), sub(Ws, te)
+            if torch is not None:
+                P_oof = oof_seq(W_tr, feats, rep_, args.e7_epochs)
+                A_tr = flight_aggregates(W_tr, P_oof); cols = PROB_COLS(list(A_tr.columns.drop(['flight_id', 'family', 'subtype'])))
+                fmod = fit(make_flight_model(rep_), A_tr[cols], A_tr['family'])
+                m = train_seq(W_tr, feats, rep_, args.e7_epochs)
+                A_te = flight_aggregates(W_te, predict_seq(m, W_te, feats)); S = A_te[['flight_id', 'family', 'subtype']].copy()
+                Q = predict_proba(fmod, A_te[cols])
+                for i, c in enumerate(CLASSES):
+                    S[f'q_{c}'] = Q[:, i]
+                S = finish_scores(S)
+                rows_flight.append({'rep': rep_, 'model': 'lstm_gru_stacked', 'flight_acc': accuracy_score(S.family, S.pred),
+                                    'flight_macro_f1': f1_score(S.family, S.pred, average='macro'), 'coarse_acc': accuracy_score(S.coarse_family, S.coarse_pred),
+                                    'flight_ece10': flight_calibration(S)['ece10']})
+            oc = oneclass_fit(W_tr, feats, rep_)
+            fl = pd.DataFrame({'flight_id': W_te['flight_id'].to_numpy(), 'flag': oneclass_flags(oc, W_te, feats)}).groupby('flight_id').flag.mean()
+            fam_te = W_te.groupby('flight_id').family.first()
+            y = (fam_te != 'nominal').astype(int); f = (fl.reindex(fam_te.index) > 0.10).astype(int)
+            rows_flight.append({'rep': rep_, 'model': 'one_class_flightrule', 'flight_acc': accuracy_score(y, f), 'flight_macro_f1': f1_score(y, f, average='macro'),
+                                'coarse_acc': np.nan, 'flight_ece10': np.nan})
+            print(f'[E7] in-distribution rep {rep_} done')
+        # --- unseen subtype, single fit per hold-out (seed 0), same allocation rule as E2
+        for fam in CLASSES[1:]:
+            for st in sorted(F.loc[F.family == fam, 'subtype'].unique()):
+                held = F.loc[F.subtype == st, 'flight_id'].tolist()
+                rng = np.random.RandomState(700)
+                seen = F.loc[(F.family == fam) & (F.subtype != st), 'flight_id'].tolist(); rng.shuffle(seen)
+                n_tr = len(seen) // 3; n_ca = len(seen) // 3
+                tr, ca, seen_test = seen[:n_tr], seen[n_tr:n_tr + n_ca], seen[n_tr + n_ca:]
+                for c in CLASSES:
+                    if c != fam:
+                        ids = F.loc[F.family == c, 'flight_id'].tolist(); rng.shuffle(ids); tr += ids[:20]; ca += ids[20:40]
+                W_tr = sub(Ws, tr); W_seen, W_held = sub(Ws, seen_test), sub(Ws, held)
+                row = {'held_out_family': fam, 'held_out_subtype': st, 'n_unseen': len(held), 'n_seen_test': len(seen_test)}
+                if torch is not None:
+                    P_oof = oof_seq(W_tr, feats, 0, args.e7_epochs)
+                    A_tr = flight_aggregates(W_tr, P_oof); cols = PROB_COLS(list(A_tr.columns.drop(['flight_id', 'family', 'subtype'])))
+                    fmod = fit(make_flight_model(0), A_tr[cols], A_tr['family']); m = train_seq(W_tr, feats, 0, args.e7_epochs)
+                    for tag_, W_ in (('unseen', W_held), ('seen', W_seen)):
+                        A_ = flight_aggregates(W_, predict_seq(m, W_, feats)); S = A_[['flight_id', 'family', 'subtype']].copy()
+                        Q = predict_proba(fmod, A_[cols])
+                        for i, c in enumerate(CLASSES):
+                            S[f'q_{c}'] = Q[:, i]
+                        S = finish_scores(S)
+                        row[f'lstm_gru_{tag_}_acc'] = float((S.pred == fam).mean()); row[f'lstm_gru_{tag_}_coarse_acc'] = float((S.coarse_pred == COARSE[fam]).mean())
+                        row[f'lstm_gru_{tag_}_conf'] = float(S.conf.mean())
+                oc = oneclass_fit(W_tr, feats, 0)
+                for tag_, W_ in (('unseen', W_held), ('seen', W_seen)):
+                    fl = pd.DataFrame({'flight_id': W_['flight_id'].to_numpy(), 'flag': oneclass_flags(oc, W_, feats)}).groupby('flight_id').flag.mean()
+                    row[f'one_class_{tag_}_detected'] = float((fl > 0.10).mean())
+                rows_loso.append(row); print(f'[E7] hold-out {st} done')
+        pd.DataFrame(rows_leak).to_csv(out / 'e7_baselines_leakage.csv', index=False)
+        pd.DataFrame(rows_flight).to_csv(out / 'e7_baselines_flight.csv', index=False)
+        pd.DataFrame(rows_loso).to_csv(out / 'e7_baselines_loso.csv', index=False)
+        if rows_leak:
+            print('\n[E7] published architectures, paired leakage audit (window level):\n',
+                  pd.DataFrame(rows_leak).groupby(['model', 'tag'])[['acc', 'macro_f1', 'ece']].mean().round(3).to_string())
+        if rows_flight:
+            print('\n[E7] published architectures, flight level in distribution:\n',
+                  pd.DataFrame(rows_flight).groupby('model')[['flight_acc', 'flight_macro_f1', 'coarse_acc', 'flight_ece10']].agg(['mean', 'std']).round(3).to_string())
+        if rows_loso:
+            print('\n[E7] published architectures, unseen subtype (single fit):\n', pd.DataFrame(rows_loso).round(3).to_string(index=False))
 
     # ---------------- E3 Whelan case studies (stacked pipeline)
     if len(Ww) and 'e3' in RUN:

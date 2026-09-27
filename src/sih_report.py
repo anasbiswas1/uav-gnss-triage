@@ -27,7 +27,7 @@ LABEL = {'nominal': 'Nominal', 'spoof': 'Spoof', 'gps_degrade': 'GNSS degradatio
          'rule': 'Percentile rule', 'stacked': 'Stacked', 'xgb': 'XGBoost', 'logreg': 'Logistic'}
 
 
-def ms(x, digits=3):
+def ms(x, digits=2):
     return f'{np.mean(x):.{digits}f} ± {np.std(x, ddof=0):.{digits}f}'
 
 
@@ -160,7 +160,7 @@ def main():
     agg = gm.mean().reset_index(); sd = gm.std(ddof=0).reset_index()
     t5 = agg[['aggregation', 'level', 'alpha', 'family']].copy()
     for c in cols5:
-        t5[c] = [f'{m_:.3f} ± {s_:.3f}' for m_, s_ in zip(agg[c], sd[c])]
+        t5[c] = [f'{m_:.2f} ± {s_:.2f}' for m_, s_ in zip(agg[c], sd[c])]
     t5['aggregation'] = t5['aggregation'].map(LABEL); t5['family'] = t5['family'].map(LABEL)
     t5 = t5.rename(columns={'aggregation': 'Aggregation', 'level': 'Level', 'family': 'Class', 'coverage': 'Coverage', 'avg_set_size': 'Mean set size',
                             'multi_label_rate': 'Multi-label', 'empty_rate': 'Empty', 'non_singleton_rate': 'Non-singleton', 'verdict_outside_set_rate': 'Verdict outside set',
@@ -183,6 +183,10 @@ def main():
     fig.legend(h, l, frameon=False, ncol=3, fontsize=8, loc='upper center', bbox_to_anchor=(0.5, 1.04))
     save(fig, 'f_conformal_stacked')
 
+    per_rep = cf[(cf.aggregation == 'stacked') & (cf.alpha == 0.1) & (cf.level == 'fine')].pivot(index='rep', columns='family', values='coverage')
+    per_rep = per_rep[[c for c in CLASSES if c in per_rep.columns]].rename(columns=LABEL).reset_index().rename(columns={'rep': 'Repetition'})
+    per_rep.to_csv(T / 't5c_coverage_per_repetition.csv', index=False)
+    md.append('## Table 5c. Fine-level coverage at alpha = 0.10 for the full stacked model, per repetition (20 test flights per class)\n\n' + md_table(per_rep, '.2f'))
     if (R / 'e1_extra_flights.csv').exists():
         ex = pd.read_csv(R / 'e1_extra_flights.csv')
         exm = ex.groupby(['aggregation', 'level', 'alpha', 'family'])[['n', 'acc', 'coverage', 'operational_abstain_rate']].mean().reset_index()
@@ -213,7 +217,7 @@ def main():
     lo = pd.read_csv(R / 'e2_leave_one_subtype_out.csv')
     ps = pd.read_csv(R / 'e2_per_seed.csv') if (R / 'e2_per_seed.csv').exists() else None
     n_seeds = int(ps['seed'].nunique()) if ps is not None else 1
-    pm = lambda a, b: [f'{m_:.3f} ± {s_:.3f}' for m_, s_ in zip(lo[a], lo[b])]
+    pm = lambda a, b: [f'{m_:.2f} ± {s_:.2f}' for m_, s_ in zip(lo[a], lo[b])]
     t6 = pd.DataFrame({'Held-out family': lo['held_out_family'].map(LABEL), 'Held-out subtype': lo['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v)),
                        'n unseen': lo['unseen_n_mean'].round(0).astype(int), 'n seen test': lo['seen_n_mean'].round(0).astype(int),
                        'Fine accuracy, unseen': pm('unseen_acc_mean', 'unseen_acc_std'), 'Fine accuracy, seen': pm('seen_acc_mean', 'seen_acc_std'),
@@ -239,6 +243,7 @@ def main():
                   'calibration size the threshold is the largest calibration score\n\n' + md_table(t6c, '.0f'))
     if 'unseen_gate_mahal_withheld_mean' in lo.columns:
         t6d = pd.DataFrame({'Held-out subtype': lo['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v)),
+                            'n unseen': lo['unseen_n_mean'].round(0).astype(int), 'n seen test': lo['seen_n_mean'].round(0).astype(int),
                             'Mahalanobis gate, unseen': pm('unseen_gate_mahal_withheld_mean', 'unseen_gate_mahal_withheld_std'),
                             'Mahalanobis gate, seen': pm('seen_gate_mahal_withheld_mean', 'seen_gate_mahal_withheld_std'),
                             'Isolation-forest gate, unseen': pm('unseen_gate_iso_withheld_mean', 'unseen_gate_iso_withheld_std'),
@@ -268,7 +273,7 @@ def main():
                   '95th percentile of the calibration flights), and the combined policy\n\n' + md_table(t6d))
         fig, ax = plt.subplots(figsize=(7.2, 3.2))
         x = np.arange(len(lo)); w = 0.26
-        ax.bar(x - w, lo['unseen_operational_abstain_a0.1_mean'], w, yerr=lo['unseen_operational_abstain_a0.1_std'], label='Conformal policy alone', capsize=2)
+        ax.bar(x - w, lo['unseen_operational_abstain_a0.1_mean'], w, yerr=lo['unseen_operational_abstain_a0.1_std'], label='Conformal policy alone (mean ± std, 3 seeds)', capsize=2)
         ax.bar(x, lo['unseen_gate_mahal_withheld_mean'], w, yerr=lo['unseen_gate_mahal_withheld_std'], label='Mahalanobis gate', capsize=2)
         ax.bar(x + w, lo['unseen_gate_mahal_or_conformal_withheld_mean'], w, yerr=lo['unseen_gate_mahal_or_conformal_withheld_std'], label='Combined', capsize=2)
         ax.plot(x, lo['seen_gate_mahal_or_conformal_withheld_mean'], 'kv', ms=5, label='Combined, seen-subtype test set')
@@ -278,8 +283,8 @@ def main():
         save(fig, 'f_distributional_gate')
     fig, ax = plt.subplots(figsize=(7.2, 3.4))
     x = np.arange(len(lo)); w = 0.2
-    ax.bar(x - 1.5 * w, lo['unseen_acc_mean'], w, yerr=lo['unseen_acc_std'], label='Fine accuracy, unseen', capsize=2)
-    ax.bar(x - 0.5 * w, lo['seen_acc_mean'], w, yerr=lo['seen_acc_std'], label='Fine accuracy, seen test', capsize=2)
+    ax.bar(x - 1.5 * w, lo['unseen_acc_mean'], w, yerr=lo['unseen_acc_std'], label='Fine accuracy, unseen (mean ± std, 3 seeds)', capsize=2)
+    ax.bar(x - 0.5 * w, lo['seen_acc_mean'], w, yerr=lo['seen_acc_std'], label='Fine accuracy, seen test (mean ± std, 3 seeds)', capsize=2)
     ax.bar(x + 0.5 * w, lo['unseen_coverage_a0.1_mean'], w, yerr=lo['unseen_coverage_a0.1_std'], label='Fine coverage (0.10), unseen', capsize=2)
     ax.bar(x + 1.5 * w, lo['seen_coverage_a0.1_mean'], w, yerr=lo['seen_coverage_a0.1_std'], label='Fine coverage (0.10), seen test', capsize=2)
     ax.plot(x, lo['unseen_mean_conf_mean'], 'k_', ms=14, mew=2, label='Mean confidence, unseen')
@@ -351,7 +356,7 @@ def main():
             e5['method'] = e5['method'].map({'rule': 'Declared rule', 'cusum': 'CUSUM'})
             e5 = e5.sort_values(['method', 'family', 'subtype'], ascending=[False, True, True])
         t7d = e5.rename(columns={'method': 'Method', 'family': 'Family', 'subtype': 'Subtype', 'n': 'Flights', 'detected_within_60s': 'Detected within 60 s',
-                                 'median_abs_error_s': 'Median |onset error| (s)', 'within_10s': 'Within 10 s', 'median_signed_error_s': 'Median signed error (s)',
+                                 'median_abs_error_s': 'Median |onset error| (s)', 'within_10s': 'Within 10 s', 'within_30s': 'Within 30 s', 'median_signed_error_s': 'Median signed error (s)',
                                  'early_alert_rate': 'Early or false alert rate'})
         t7d.to_csv(T / 't7d_onset_localisation.csv', index=False)
         md.append('## Table 7d. Onset localisation on held-out flights with the declared alert rule against the logged onset (one fitted pipeline); for nominal '
@@ -376,13 +381,23 @@ def main():
                                          'Coarse verdict: nominal', 'Coarse verdict: GNSS-chain inconsistency', 'Coarse verdict: non-GNSS fault',
                                          'Operational abstention, fine (0.10)', 'Operational abstention, coarse (0.10)', 'Mahalanobis gate withheld',
                                          'Isolation-forest gate withheld', 'Gap-rule baseline withheld', 'Mean confidence', 'Median confidence',
-                                         'Flights with at least one alert episode', 'Nominal verdict, not withheld by set or gate'],
+                                         'Flights with at least one alert episode', 'Nominal verdict, not withheld by set or gate',
+                                         'Missing base features per flight, mean', 'Missing base features per flight, max'],
                             'Value': [int(e6['n_flights']), int(e6['n_windows']), e6['verdict_frac_nominal'], e6['verdict_frac_spoof'], e6['verdict_frac_gps_degrade'],
                                       e6['verdict_frac_sensor_fault'], e6['coarse_verdict_frac_nominal'], e6['coarse_verdict_frac_gnss_chain'], e6['coarse_verdict_frac_non_gnss_fault'],
                                       e6['abstain_fine_rate'], e6['abstain_coarse_rate'], e6['gate_mahal_withheld'], e6['gate_iso_withheld'], e6['gate_gaprule_withheld'],
-                                      e6['mean_conf'], e6['median_conf'], e6['frac_with_alert_episode'], e6['nominal_and_not_withheld_frac']]})
+                                      e6['mean_conf'], e6['median_conf'], e6['frac_with_alert_episode'], e6['nominal_and_not_withheld_frac'],
+                                      e6.get('missing_frac_mean', float('nan')), e6.get('missing_frac_max', float('nan'))]})
         t10.to_csv(T / 't10_real_logs.csv', index=False)
         md.append('## Table 10. Real PX4 flight logs without ground truth: verdict distribution, abstention and gate behaviour of the pipeline trained on simulation only\n\n' + md_table(t10))
+        if 'n_low_missing' in e6.index:
+            t10c = pd.DataFrame({'Missing base features': ['5 percent or less', 'more than 5 percent'],
+                                 'Flights': [int(e6['n_low_missing']), int(e6['n_high_missing'])],
+                                 'Nominal verdict': [e6['nominal_low_missing'], e6['nominal_high_missing']],
+                                 'Operational abstention': [e6['abstain_low_missing'], e6['abstain_high_missing']],
+                                 'Mahalanobis gate withheld': [e6['gate_withheld_low_missing'], e6['gate_withheld_high_missing']]})
+            t10c.to_csv(T / 't10c_real_logs_by_missingness.csv', index=False)
+            md.append('## Table 10c. Real PX4 logs split by the fraction of missing base features per flight\n\n' + md_table(t10c))
         if (R / 'e6_real_by_version.csv').exists():
             bv = pd.read_csv(R / 'e6_real_by_version.csv').rename(columns={'ver_sw_release': 'Firmware release', 'px4_version': 'PX4 release', 'n': 'Flights', 'nominal': 'Nominal verdict',
                                                                           'abstain': 'Operational abstention', 'gate': 'Mahalanobis gate withheld', 'conf': 'Mean confidence'})
@@ -394,6 +409,45 @@ def main():
         counts = vr['pred'].value_counts().reindex(CLASSES).fillna(0)
         axes[1].bar([LABEL[c] for c in CLASSES], counts.to_numpy()); axes[1].set_title('Real logs: verdicts'); plt.setp(axes[1].get_xticklabels(), rotation=20, ha='right', fontsize=7)
         save(fig, 'f_real_logs')
+
+    # ---------------------------------------------------------------- T16 published architectures under the same protocol
+    if (R / 'e7_baselines_leakage.csv').exists():
+        lk = pd.read_csv(R / 'e7_baselines_leakage.csv')
+        e0b = pd.read_csv(R / 'e0_leakage_audit.csv'); e0b['model'] = 'xgboost'
+        allk = pd.concat([e0b[['rep', 'model', 'tag', 'acc', 'macro_f1', 'ece']], lk[['rep', 'model', 'tag', 'acc', 'macro_f1', 'ece']]], ignore_index=True)
+        MODEL = {'xgboost': 'XGBoost (this paper)', 'lstm_gru': 'LSTM-GRU sequence model [6]', 'one_class': 'One-class novelty detector [5], nominal vs attack'}
+        rows = []
+        for m_ in ('xgboost', 'lstm_gru', 'one_class'):
+            d = allk[allk.model == m_]
+            if not len(d):
+                continue
+            g_ = d.groupby('tag'); rnd = g_.get_group('random_window_split') if 'random_window_split' in g_.groups else None; grp = g_.get_group('flight_grouped_split')
+            piv = d.pivot(index='rep', columns='tag', values='acc'); diff = piv['random_window_split'] - piv['flight_grouped_split']
+            rows.append({'Detector': MODEL[m_], 'Random-window accuracy': ms(rnd['acc']) if rnd is not None else '', 'Flight-grouped accuracy': ms(grp['acc']),
+                         'Paired difference': ms(diff), 'Random-window macro-F1': ms(rnd['macro_f1']), 'Flight-grouped macro-F1': ms(grp['macro_f1']),
+                         'Flight-grouped ECE': ms(grp['ece']) if grp['ece'].notna().any() else 'n/a'})
+        t16 = pd.DataFrame(rows); t16.to_csv(T / 't16_published_architectures_leakage.csv', index=False)
+        md.append('## Table 16. Published architectures under the same paired leakage audit (window level; the one-class detector is scored on nominal versus attack)\n\n' + md_table(t16))
+        if (R / 'e7_baselines_flight.csv').exists():
+            fb = pd.read_csv(R / 'e7_baselines_flight.csv'); g_ = fb.groupby('model')
+            FM = {'lstm_gru_stacked': 'LSTM-GRU with the same flight-level stacking', 'one_class_flightrule': 'One-class detector, flight flagged above 10 percent of windows (nominal vs attack)'}
+            t16b = pd.DataFrame({'Detector': [FM.get(k, k) for k in g_.groups], 'Flight accuracy': [ms(v['flight_acc']) for _, v in g_],
+                                 'Flight macro-F1': [ms(v['flight_macro_f1']) for _, v in g_],
+                                 'Coarse accuracy': [ms(v['coarse_acc']) if v['coarse_acc'].notna().any() else 'n/a' for _, v in g_],
+                                 'Flight ECE (10 bins)': [ms(v['flight_ece10']) if v['flight_ece10'].notna().any() else 'n/a' for _, v in g_]})
+            t16b.to_csv(T / 't16b_published_architectures_flight.csv', index=False)
+            md.append('## Table 16b. Published architectures at the flight level on the same balanced test sets, mean ± std over five repetitions\n\n' + md_table(t16b))
+        if (R / 'e7_baselines_loso.csv').exists():
+            lb = pd.read_csv(R / 'e7_baselines_loso.csv'); lb['held_out_subtype'] = lb['held_out_subtype'].map(lambda v: SUBTYPE_LABEL.get(v, v))
+            keep = [c for c in ['held_out_subtype', 'n_unseen', 'n_seen_test', 'lstm_gru_unseen_acc', 'lstm_gru_seen_acc', 'lstm_gru_unseen_coarse_acc', 'lstm_gru_seen_coarse_acc',
+                                'lstm_gru_unseen_conf', 'one_class_unseen_detected', 'one_class_seen_detected'] if c in lb.columns]
+            t16c = lb[keep].rename(columns={'held_out_subtype': 'Held-out subtype', 'n_unseen': 'n unseen', 'n_seen_test': 'n seen test',
+                                            'lstm_gru_unseen_acc': 'LSTM-GRU accuracy, unseen', 'lstm_gru_seen_acc': 'LSTM-GRU accuracy, seen',
+                                            'lstm_gru_unseen_coarse_acc': 'LSTM-GRU coarse, unseen', 'lstm_gru_seen_coarse_acc': 'LSTM-GRU coarse, seen',
+                                            'lstm_gru_unseen_conf': 'LSTM-GRU confidence, unseen', 'one_class_unseen_detected': 'One-class detected, unseen',
+                                            'one_class_seen_detected': 'One-class detected, seen'})
+            t16c.to_csv(T / 't16c_published_architectures_unseen.csv', index=False)
+            md.append('## Table 16c. Published architectures on the withheld subtype and on the seen-subtype test set (single fit per hold-out)\n\n' + md_table(t16c))
 
     # ---------------------------------------------------------------- T8 feature importance, T9 flight-model coefficients
     if (R / 'e1_rep0_window_feature_importance.csv').exists():
